@@ -22,20 +22,13 @@ def make_candles(opens_highs_lows_closes, volume=1000):
 
 def valid_long_fixture(retrace_volume=400):
     rows = [
-        (100.0, 100.8, 99.8, 100.6),
-        (100.6, 101.8, 100.4, 101.6),
-        (101.6, 103.0, 101.3, 102.8),
-        (102.8, 104.2, 102.5, 104.0),
-        (104.0, 105.0, 103.7, 104.8),
-        (104.8, 104.5, 103.0, 103.5),
-        (103.5, 104.0, 102.6, 103.0),
-        (103.0, 103.8, 102.4, 102.8),
-        (102.8, 103.5, 102.2, 102.9),
-        (102.9, 103.8, 102.3, 103.1),
-        (103.1, 104.0, 102.5, 103.4),
-        (103.4, 104.2, 102.6, 103.6),
-        (103.6, 104.4, 102.7, 103.8),
-        (103.8, 104.5, 102.8, 104.0),
+        (100.0, 100.8, 99.8, 100.6), (100.6, 101.8, 100.4, 101.6),
+        (101.6, 103.0, 101.3, 102.8), (102.8, 104.2, 102.5, 104.0),
+        (104.0, 105.0, 103.7, 104.8), (104.8, 104.5, 103.0, 103.5),
+        (103.5, 104.0, 102.6, 103.0), (103.0, 103.8, 102.4, 102.8),
+        (102.8, 103.5, 102.2, 102.9), (102.9, 103.8, 102.3, 103.1),
+        (103.1, 104.0, 102.5, 103.4), (103.4, 104.2, 102.6, 103.6),
+        (103.6, 104.4, 102.7, 103.8), (103.8, 104.5, 102.8, 104.0),
         (104.0, 104.7, 103.0, 104.2),
     ]
     volumes = [1500] * 5 + [retrace_volume] * 10
@@ -68,17 +61,7 @@ class StrategyTests(unittest.TestCase):
 
     def test_strict_impulse_retracement_candidate_exists(self):
         cs = valid_long_fixture()
-        candidate = evaluate(
-            "TEST",
-            cs,
-            entry=104.2,
-            previous_close=100.0,
-            market_return=1.0,
-            sector_return=1.0,
-            gap_history=[0.0] * 20,
-            cfg=self.cfg,
-            tier=1,
-        )
+        candidate = evaluate("TEST", cs, 104.2, 101.0, 1.0, 1.0, [0.0] * 20, self.cfg, 1)
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.side, "LONG")
         self.assertEqual(candidate.tier, 1)
@@ -88,51 +71,21 @@ class StrategyTests(unittest.TestCase):
 
     def test_extreme_gap_is_hard_excluded_from_all_tiers(self):
         cs = valid_long_fixture()
-        # Previous close of 95 makes the opening gap ~5.3%, above the 3% hard cap.
         for tier in (1, 2, 3):
-            candidate = evaluate(
-                "GAPTEST",
-                cs,
-                entry=104.2,
-                previous_close=95.0,
-                market_return=1.0,
-                sector_return=1.0,
-                gap_history=[0.0] * 20,
-                cfg=self.cfg,
-                tier=tier,
-            )
+            candidate = evaluate("GAPTEST", cs, 104.2, 95.0, 1.0, 1.0, [0.0] * 20, self.cfg, tier)
             self.assertIsNone(candidate)
 
     def test_high_retrace_volume_can_drop_to_fallback(self):
         cs = valid_long_fixture(retrace_volume=1300)
-        candidates = evaluate_tiers(
-            "FALLBACK",
-            cs,
-            entry=104.2,
-            previous_close=100.0,
-            market_return=1.0,
-            sector_return=1.0,
-            gap_history=[0.0] * 20,
-            cfg=self.cfg,
-        )
+        candidates = evaluate_tiers("FALLBACK", cs, 104.2, 101.0, 1.0, 1.0, [0.0] * 20, self.cfg)
         self.assertTrue(candidates)
         self.assertTrue(any(c.tier > 1 for c in candidates))
 
     def test_candidate_risk_is_positive_and_target_is_directional(self):
         cs = valid_long_fixture()
-        candidate = evaluate(
-            "RISK",
-            cs,
-            entry=104.2,
-            previous_close=100.0,
-            market_return=0.5,
-            sector_return=0.5,
-            gap_history=[0.0] * 20,
-            cfg=self.cfg,
-        )
+        candidate = evaluate("RISK", cs, 104.2, 101.0, 0.5, 0.5, [0.0] * 20, self.cfg)
         self.assertIsNotNone(candidate)
-        risk = abs(candidate.entry - candidate.stop)
-        self.assertGreater(risk, 0)
+        self.assertGreater(abs(candidate.entry - candidate.stop), 0)
         if candidate.side == "LONG":
             self.assertGreater(candidate.target, candidate.entry)
         else:

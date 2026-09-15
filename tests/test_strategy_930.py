@@ -69,11 +69,13 @@ class StrategyTests(unittest.TestCase):
         self.assertLessEqual(candidate.retracement_depth, self.cfg.max_retracement_depth)
         self.assertGreaterEqual(candidate.target - candidate.entry, 2 * abs(candidate.entry - candidate.stop))
 
-    def test_extreme_gap_is_hard_excluded_from_all_tiers(self):
+    def test_tier3_forces_signal_even_when_gap_breaks_pattern_gates(self):
         cs = valid_long_fixture()
-        for tier in (1, 2, 3):
-            candidate = evaluate("GAPTEST", cs, 104.2, 95.0, 1.0, 1.0, [0.0] * 20, self.cfg, tier)
-            self.assertIsNone(candidate)
+        candidate = evaluate("GAPTEST", cs, 104.2, 95.0, 1.0, 1.0, [0.0] * 20, self.cfg, 3)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.tier, 3)
+        self.assertIn("FORCED_ENTRY_TIER_3", candidate.reasons)
+        self.assertGreater(abs(candidate.entry - candidate.stop), 0)
 
     def test_high_retrace_volume_can_drop_to_fallback(self):
         cs = valid_long_fixture(retrace_volume=1300)

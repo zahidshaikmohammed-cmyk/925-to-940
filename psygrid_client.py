@@ -63,8 +63,11 @@ class PsygridClient:
         got={c.ts.replace(second=0,microsecond=0) for c in cs if c.ts.date()==now.date() and c.ts.time()<dtime(9,30)}
         if len(got)!=15 or any(x not in got for x in grid):reasons.append('missing_09_15_to_09_29_grid')
         cs=tuple(c for c in cs if c.ts.date()==now.date() and dtime(9,15)<=c.ts.time()<dtime(9,30))
-        prev=None
-        for r in self.candles(payload.get('15m',[])):
-            if r.ts.date()<now.date() and r.ts.time()<=dtime(15,15):prev=r.close
+        prev=payload.get('previous_close')
+        try:prev=float(prev) if prev is not None else None
+        except (TypeError,ValueError):prev=None
+        if prev is None:
+            for r in self.candles(payload.get('15m',[])):
+                if r.ts.date()<now.date() and r.ts.time()<=dtime(15,15):prev=r.close
         if prev is None:reasons.append('missing_previous_close')
         health=Health(symbol,not reasons,';'.join(reasons)); return StockData(symbol,cs,ltp,prev,health)

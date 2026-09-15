@@ -1,4 +1,10 @@
-"""One-command launcher for the PSYGRID 09:31 engine."""
+"""Single-command launcher for the PSYGRID 09:31 engine.
+
+Examples:
+    python bbbbb.py --self-test
+    python bbbbb.py --preflight-only
+    python bbbbb.py
+"""
 
 from run_engine import main
 

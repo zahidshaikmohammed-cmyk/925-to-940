@@ -30,7 +30,10 @@ class OpeningEngine:
     def lock(self, now: datetime) -> tuple[Decision, ...]:
         if self.session.locked:
             return self.session.locked_decisions
-        locked = rank_and_lock(self.latest.values(), now, top_n=3)
+        ranked = rank_and_lock(self.latest.values(), now, top_n=3)
+        # Top-3 integrity: no partial basket. If fewer than three hard-gated
+        # candidates exist, the session is explicitly NO TRADE.
+        locked = ranked if len(ranked) == 3 else ()
         self.session.locked = True
         self.session.locked_decisions = locked
         return locked

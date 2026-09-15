@@ -145,13 +145,105 @@ def _hard_exhaustion(
         return True
     if impulse_atr > cfg.max_impulse_atr:
         return True
-    # Distance from the extreme must be meaningful in ATR units. This is the
-    # explicit anti-exhaustion test; it is never relaxed by fallback tiers.
     if abs(final_close - extreme) / max(atr_value, 1e-12) < cfg.exhaustion_reclaim_distance_atr:
         return True
     if abs(vwap_distance_atr) > cfg.max_extension_from_vwap_atr:
         return True
     return False
+
+
+def _emergency_candidate(
+    symbol: str,
+    side: int,
+    name: str,
+    cs: list[Candle],
+    entry: float,
+    previous_close: float,
+    market_return: float,
+    sector_return: float,
+    cfg: StrategyConfig,
+) -> Candidate | None:
+    """Tier 3: deterministic last-resort candidate for a healthy feed.
+
+    Tier 1/2 are pattern gates. Tier 3 is deliberately NOT a pattern gate: once
+    the feed is valid, the engine must still be able to select a direction.
+    Extreme gap/extension/exhaustion are scored as penalties, not vetoes, so a
+    healthy universe can never produce an artificial 'NO SIGNAL' merely because
+    a strategy threshold was too restrictive.
+    """
+    a = atr(cs, cfg.atr_period)
+    if a <= 0 or entry <= 0 or previous_close <= 0:
+        return None
+
+    start = cs[0].open
+    last = cs[-1].close
+    vw = vwap(cs)
+    stock_ret = 100.0 * (last / start - 1.0)
+    gap = 100.0 * (start / previous_close - 1.0)
+    rs = side * (stock_ret - market_return)
+    srs = side * (stock_ret - sector_return)
+    impulse = side * stock_ret
+    move_atr = abs(last - start) / a
+    vw_dist = side * (last - vw) / a
+    eff = efficiency(cs)
+    recent_move = side * (last - cs[-4].close) / a
+    directional_score = clamp(0.5 + 0.20 * impulse / max(1.0, abs(impulse)) + 0.20 * clamp(recent_move / 2.0) + 0.10 * clamp(vw_dist / 2.0))
+    rs_score = clamp(0.5 + 0.15 * rs + 0.10 * srs)
+    structure_score = clamp(0.5 * clamp(eff) + 0.5 * directional_score)
+
+    if side == 1:
+        structural_low = min(c.low for c in cs[-5:])
+        stop = min(structural_low - 0.20 * a, entry - 0.35 * a)
+    else:
+        structural_high = max(c.high for c in cs[-5:])
+        stop = max(structural_high + 0.20 * a, entry + 0.35 * a)
+
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    target_distance = max(cfg.minimum_rr * risk, cfg.minimum_target_atr * a)
+    target = entry + side * target_distance
+
+    penalty = 0.0
+    if abs(gap) > cfg.max_gap_pct:
+        penalty += 12.0
+    if move_atr > cfg.max_impulse_atr:
+        penalty += 10.0
+    if abs(vw_dist) > cfg.max_extension_from_vwap_atr:
+        penalty += 8.0
+
+    score = 20.0 + 35.0 * directional_score + 25.0 * rs_score + 20.0 * structure_score - penalty
+    reasons = (
+        "FORCED_ENTRY_TIER_3",
+        "PATTERN_GATES_BYPASSED_AFTER_TIER_1_2_FAILURE",
+        f"directional_score={directional_score:.3f}",
+        f"gap={gap:+.3f}%",
+        f"move_atr={move_atr:.3f}",
+        f"rs_market={rs:+.3f}%",
+        f"rs_sector={srs:+.3f}%",
+        f"vw_dist_atr={vw_dist:+.3f}",
+    )
+    return Candidate(
+        symbol=symbol,
+        side=name,
+        score=score,
+        entry=entry,
+        stop=stop,
+        target=target,
+        gap_pct=gap,
+        impulse_pct=impulse,
+        impulse_atr=move_atr,
+        retracement_depth=0.0,
+        retracement_volume_ratio=1.0,
+        rs_market=rs,
+        rs_sector=srs,
+        vwap_distance_atr=vw_dist,
+        structure=structure_score,
+        atr_value=a,
+        retracement_level=last,
+        tier=3,
+        reasons=reasons,
+    )
 
 
 def _build_candidate(
@@ -167,6 +259,12 @@ def _build_candidate(
     cfg: StrategyConfig,
     tier: int,
 ):
+    if tier == 3:
+        return _emergency_candidate(
+            symbol, side, name, cs, entry, previous_close,
+            market_return, sector_return, cfg,
+        )
+
     a = atr(cs, cfg.atr_period)
     if a <= 0:
         return None
@@ -191,7 +289,6 @@ def _build_candidate(
     extension = abs(cs[-1].close - vw) / a
     persistence = sum(1 for c in cs[1:] if side * (c.close - c.open) > 0) / 14.0
 
-    # Absolute exclusions. These are never relaxed by fallback mode.
     if abs(gap) > cfg.max_gap_pct or abs(gap_z) > cfg.max_gap_z:
         return None
     if impulse_pct < cfg.min_impulse_pct:
@@ -310,6 +407,11 @@ def evaluate(
         return None
     if previous_close <= 0 or entry <= 0:
         return None
+    if tier == 3:
+        longs = _emergency_candidate(symbol, 1, "LONG", cs, entry, previous_close, market_return, sector_return, cfg)
+        shorts = _emergency_candidate(symbol, -1, "SHORT", cs, entry, previous_close, market_return, sector_return, cfg)
+        return max((c for c in (longs, shorts) if c is not None), key=lambda c: (c.score, c.side == "LONG"), default=None)
+
     gap = 100.0 * (cs[0].open / previous_close - 1.0)
     gap_z = robust_z(gap, gap_history)
     best = None

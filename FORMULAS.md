@@ -2,41 +2,31 @@
 
 ## 1. Observation window
 
-The engine freezes the **15 completed one-minute candles from 09:15:00 through 09:29:59 IST**. It does not use the still-forming 09:30 candle.
-
-NSE's normal equity market opens at 09:15 IST and closes at 15:30 IST. citeturn0search0
+The engine freezes the 15 completed one-minute candles from 09:15:00 through 09:29:59 IST. It does not use the still-forming 09:30 candle.
 
 ## 2. Opening gap
 
 `Gap% = 100 * (09:15 open / previous close - 1)`
 
-Hard exclusion:
+Hard exclusion: `abs(Gap%) > 3.0%`.
 
-`abs(Gap%) > 3.0%`
-
-A robust cross-sectional z-score is also calculated using median/MAD:
+Robust cross-sectional z-score:
 
 `z = 0.6744897501960817 * (x - median(x)) / MAD(x)`
 
 with `z = 0` when MAD is zero or fewer than five observations exist.
 
-Hard exclusion:
-
-`abs(Gap z) > 3`
+Hard exclusion: `abs(Gap z) > 3`.
 
 ## 3. True Range and ATR
 
-For candle `t`:
-
 `TR_t = max(H-L, |H-C_(t-1)|, |L-C_(t-1)|)`
 
-The engine uses the median of the most recent 10 TR values rather than an exchange-supplied indicator.
+ATR is the median of the most recent 10 TR values.
 
 ## 4. Directional impulse
 
-For LONG, the impulse extreme is the highest high in the opening window.
-
-For SHORT, the impulse extreme is the lowest low.
+For LONG, the impulse extreme is the highest high. For SHORT, it is the lowest low.
 
 `Impulse% = direction * 100 * (Extreme / OpeningPrice - 1)`
 
@@ -50,28 +40,20 @@ Hard exclusions:
 
 ## 5. Retracement depth
 
-For LONG:
-
+LONG:
 `Depth = (Extreme - RetracementLow) / (Extreme - OpeningPrice)`
 
-For SHORT:
-
+SHORT:
 `Depth = (RetracementHigh - Extreme) / (OpeningPrice - Extreme)`
 
-Strict range:
-
-`0.38 <= Depth <= 0.70`
-
-This deliberately rejects shallow pullbacks.
+Strict range: `0.38 <= Depth <= 0.70`.
 
 ## 6. Reclaim ratio
 
-For LONG:
-
+LONG:
 `Reclaim = (LastClose - RetracementLow) / (Extreme - RetracementLow)`
 
-For SHORT:
-
+SHORT:
 `Reclaim = (RetracementHigh - LastClose) / (RetracementHigh - Extreme)`
 
 Strict requirement: `Reclaim >= 0.50`.
@@ -81,8 +63,6 @@ Strict requirement: `Reclaim >= 0.50`.
 `RetracementVolumeRatio = mean(retracement volume) / mean(impulse volume)`
 
 Strict requirement: `<= 0.80`.
-
-The desired geometry is expansion during impulse followed by lower participation during the pullback.
 
 ## 8. Directional efficiency
 
@@ -102,12 +82,10 @@ Strict requirement: `>= 0.60`.
 
 `TypicalPrice = (High + Low + Close) / 3`
 
-For LONG:
-
+LONG:
 `VWAPDistanceATR = (LastClose - VWAP) / ATR`
 
-For SHORT:
-
+SHORT:
 `VWAPDistanceATR = (VWAP - LastClose) / ATR`
 
 Strict mode requires positive directional VWAP confirmation and rejects extension beyond 2 ATR.
@@ -118,11 +96,11 @@ Strict mode requires positive directional VWAP confirmation and rejects extensio
 
 `RS_sector = direction * (StockReturn - SectorMedianReturn)`
 
-When a sector map is unavailable, the healthy-universe median is used as the deterministic benchmark rather than inventing sector classifications.
+When a sector map is unavailable, the healthy-universe median is used as the deterministic benchmark rather than inventing classifications.
 
 ## 12. Ranking
 
-The score is a weighted sum of normalized components:
+Weights:
 
 - impulse: 18%
 - retracement: 20%
@@ -133,19 +111,15 @@ The score is a weighted sum of normalized components:
 - structure: 10%
 - volatility: 10%
 
-The weights sum to exactly 100%.
+Total: exactly 100%.
 
-Fallback candidates receive an explicit score penalty and are never allowed to outrank a better strict candidate solely because of the fallback path.
+Fallback candidates receive an explicit score penalty.
 
 ## 13. Stop loss
 
-LONG:
+LONG: `SL = RetracementLow - 0.35 * ATR`
 
-`SL = RetracementLow - 0.35 * ATR`
-
-SHORT:
-
-`SL = RetracementHigh + 0.35 * ATR`
+SHORT: `SL = RetracementHigh + 0.35 * ATR`
 
 ## 14. Target
 
@@ -153,22 +127,18 @@ SHORT:
 
 `TargetDistance = max(2.0 * Risk, 1.50 * ATR)`
 
-LONG:
+LONG: `TP = Entry + TargetDistance`
 
-`TP = Entry + TargetDistance`
-
-SHORT:
-
-`TP = Entry - TargetDistance`
+SHORT: `TP = Entry - TargetDistance`
 
 ## 15. Emergency path
 
-If the normal candidate set is empty, the engine evaluates fallback tiers while preserving the hard exclusions for extreme gaps and exhausted/overextended impulses.
+If strict candidates are empty, fallback tiers are evaluated while preserving the hard exclusions for extreme gaps and exhausted/overextended impulses.
 
-If the selected price crosses the frozen structural stop between 09:30 and 09:31, the engine does not silently die. It deterministically rebases the stop to `max(0.35 ATR, minimum_risk_pct)` and marks the signal `EMERGENCY_STOP_REBASED_AT_09_31`.
+If the selected price crosses the frozen structural stop between 09:30 and 09:31, the engine deterministically rebases the stop to an ATR/risk-based emergency distance and marks the signal `EMERGENCY_STOP_REBASED_AT_09_31`.
 
-## 16. Data-integrity rule
+## 16. Data integrity
 
-No synthetic candle is created by this strategy. Missing or malformed 09:15–09:29 candles make that stock unhealthy and exclude it from ranking.
+No synthetic candle is created. Missing or malformed 09:15–09:29 candles make that stock unhealthy and exclude it from ranking.
 
-A complete 450-symbol shard snapshot is retained so a transient network failure at exactly 09:30 does not destroy the decision.
+A complete 450-stock snapshot is retained so a transient network failure at exactly 09:30 does not destroy the decision.

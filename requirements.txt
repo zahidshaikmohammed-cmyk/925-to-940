@@ -1,2 +1,1 @@
-# Runtime dependencies: Python 3.12 standard library only.
-# No third-party package is required by the 09:31 engine.
+pytest>=8,<9

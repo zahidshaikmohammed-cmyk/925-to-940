@@ -91,8 +91,9 @@ def print_banner() -> None:
     print("PSYGRID // 09:31 DETERMINISTIC OPENING-MOMENTUM ENGINE")
     print("=" * 88)
     print("450 stocks | 10 shards x 45 | completed 09:15-09:29 candles | freeze 09:30 | entry 09:31")
-    print("NORMAL -> FALLBACK TIER 2 -> FALLBACK TIER 3")
-    print("Hard exclusions always active: extreme gap / extreme extension / exhausted impulse")
+    print("NORMAL -> FALLBACK TIER 2 -> FORCED ENTRY TIER 3")
+    print("Tier 1/2 use pattern gates; Tier 3 removes strategic no-signal gates and selects from healthy feed")
+    print("Feed integrity remains mandatory: no fabricated candles, no invented LTP, no missing-universe signal")
     print("=" * 88)
 
 
@@ -330,8 +331,9 @@ def main(argv: list[str] | None = None) -> int:
 
     candidates = build_candidates(frozen, sectors, cfg)
     strict_count = sum(c.tier == 1 for c in candidates)
-    fallback_count = sum(c.tier > 1 for c in candidates)
-    print(f"CANDIDATES: total={len(candidates)} strict={strict_count} fallback={fallback_count}")
+    tier2_count = sum(c.tier == 2 for c in candidates)
+    forced_count = sum(c.tier == 3 for c in candidates)
+    print(f"CANDIDATES: total={len(candidates)} strict={strict_count} fallback_tier2={tier2_count} forced_tier3={forced_count}")
     if not sectors:
         print("SECTOR MAP: absent -> sector RS benchmark uses healthy-universe median")
 
@@ -342,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
 
     options = [c for c in (best_long, best_short) if c is not None]
     if not options:
-        print("FATAL: emergency tiers found no valid candidate while hard exclusions were respected.")
+        print("FATAL: no candidate. This is a feed-integrity failure, not a strategy gate.")
         audit.event("FATAL_NO_CANDIDATE")
         return 31
 

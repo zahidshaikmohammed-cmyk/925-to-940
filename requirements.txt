@@ -1,1 +1,2 @@
-pytest>=8,<9
+# No third-party runtime dependencies are required.
+# The engine and its completed test suite use Python 3.12 standard-library modules.

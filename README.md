@@ -36,11 +36,12 @@ A candidate must satisfy all of these before scoring:
 5. Stock relative strength versus NIFTY is at least 0.20 percentage points in the candidate direction.
 6. Sector relative strength versus the sector median is at least 0.10 percentage points in the candidate direction.
 7. Price is on the correct side of session VWAP.
-8. Price is not already extended: distance from VWAP must be <= 1.80 ATR(1m-equivalent) and distance from opening extreme must be <= 1.25 ATR(1m-equivalent).
-9. A directional 1-minute structure confirmation exists: latest close is above the 09:15–09:24 opening high for LONG or below the opening low for SHORT, OR the latest two closes make a higher-high/higher-low or lower-low/lower-high continuation pattern.
+8. **Anti-chasing hard gate:** distance from VWAP must be <= 1.80 ATR(1m-equivalent), and price extension beyond the opening extreme must be <= 1.25 ATR(1m-equivalent).
+9. A directional 1-minute structure confirmation exists: opening-range break or higher-high/higher-low / lower-low/lower-high continuation.
 10. Higher-timeframe alignment: 15m and 1h trend signs must agree with the candidate direction.
+11. At least 3 post-09:25 directional observations exist and persistence is >= 0.60.
 
-If fewer than 3 candidates pass the gates, fewer than 3 are locked. The engine never manufactures a third choice.
+**Top-3 integrity rule:** the engine locks Top 3 only when at least three candidates pass every hard gate. If fewer than three pass, it locks **NO TRADE** rather than manufacturing partial choices.
 
 ## Ranking score
 
@@ -57,15 +58,31 @@ All component values are normalized to `[0, 1]` using fixed piecewise-linear cla
 - `VWAP`: distance and side-of-VWAP quality.
 - `STRUCTURE`: opening-range break/continuation quality.
 - `HTF`: 15m + 1h directional alignment.
-- `PERSISTENCE`: fraction of post-09:25 observations that retain the same directional edge.
+- `PERSISTENCE`: fraction of post-09:25 observations retaining the current direction.
 
-## Persistence
+## Mathematical definitions
 
-At each completed 1-minute evaluation, the candidate direction is recorded. Persistence is:
+For stock return `R_s` and NIFTY return `R_n`:
 
-`P = directional_observations / eligible_observations`
+`RS = R_s - R_n`
 
-A candidate must have at least 3 eligible observations by 09:40 and `P >= 0.60` to pass the final persistence gate.
+For sector-median return `R_sec`:
+
+`SectorRS = R_s - R_sec`
+
+Opening return:
+
+`R_s = 100 * (C_09:24 / O_09:15 - 1)`
+
+Session VWAP:
+
+`VWAP = Σ(((H + L + C) / 3) * V) / ΣV`
+
+Persistence:
+
+`P = count(observations equal to current direction) / total eligible observations`
+
+Higher-timeframe trend is confirmed only when `Close > EMA20` and `EMA20(t) > EMA20(t-1)` for LONG; the exact mirror is required for SHORT. Otherwise HTF trend is neutral and the candidate fails the alignment gate.
 
 ## Tie-breakers
 
@@ -75,7 +92,7 @@ Ranks are deterministic:
 2. higher relative strength;
 3. higher sector relative strength;
 4. higher persistence;
-5. lower extension distance;
+5. lower VWAP extension;
 6. lexicographically smaller symbol.
 
 ## Important

@@ -135,6 +135,7 @@ def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
 def _hard_exhaustion(
     idx: int,
     impulse_atr: float,
+    atr_value: float,
     final_close: float,
     extreme: float,
     vwap_distance_atr: float,
@@ -144,7 +145,9 @@ def _hard_exhaustion(
         return True
     if impulse_atr > cfg.max_impulse_atr:
         return True
-    if abs(final_close - extreme) / max(impulse_atr, 1e-12) < cfg.exhaustion_reclaim_distance_atr:
+    # Distance from the extreme must be meaningful in ATR units. This is the
+    # explicit anti-exhaustion test; it is never relaxed by fallback tiers.
+    if abs(final_close - extreme) / max(atr_value, 1e-12) < cfg.exhaustion_reclaim_distance_atr:
         return True
     if abs(vwap_distance_atr) > cfg.max_extension_from_vwap_atr:
         return True
@@ -193,7 +196,7 @@ def _build_candidate(
         return None
     if impulse_pct < cfg.min_impulse_pct:
         return None
-    if _hard_exhaustion(idx, impulse_atr, cs[-1].close, extreme, vw_dist, cfg):
+    if _hard_exhaustion(idx, impulse_atr, a, cs[-1].close, extreme, vw_dist, cfg):
         return None
 
     strict = tier == 1
@@ -226,7 +229,6 @@ def _build_candidate(
         if extension > cfg.fallback_extension_atr_max:
             return None
 
-    # 0..1 component scores. Fallback candidates are deliberately penalized.
     si = scale(impulse_pct, cfg.min_impulse_pct, 1.5)
     sr = clamp(1.0 - abs(depth - 0.52) / 0.22)
     sm = scale(rs, 0.10, 0.80)

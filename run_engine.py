@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime
 from pathlib import Path
 from statistics import median
 from zoneinfo import ZoneInfo
@@ -22,15 +21,13 @@ SIGNAL_TIME = dtime(9, 30)
 ENTRY_TIME = dtime(9, 31)
 ENTRY_GRACE_SECONDS = 5.0
 
-# NSE 2026 full-day equity holidays relevant to the engine. The exchange
-# calendar is also checked for weekends. Keep this list editable if NSE issues
-# a special-session notice.
 NSE_HOLIDAYS_2026 = {
-    "2026-01-26", "2026-02-19", "2026-03-03", "2026-03-19",
-    "2026-03-26", "2026-03-31", "2026-04-01", "2026-04-03",
-    "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26",
-    "2026-08-26", "2026-09-14", "2026-10-02", "2026-10-20",
-    "2026-11-08", "2026-11-10", "2026-11-24", "2026-12-25",
+    "2026-01-15", "2026-01-26", "2026-02-19", "2026-03-03",
+    "2026-03-19", "2026-03-26", "2026-03-31", "2026-04-01",
+    "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
+    "2026-06-26", "2026-08-26", "2026-09-14", "2026-10-02",
+    "2026-10-20", "2026-11-08", "2026-11-10", "2026-11-24",
+    "2026-12-25",
 }
 
 
@@ -39,11 +36,7 @@ class Audit:
         self.path = Path(path)
 
     def event(self, event: str, **fields) -> None:
-        record = {
-            "ts": datetime.now(IST).isoformat(),
-            "event": event,
-            **fields,
-        }
+        record = {"ts": datetime.now(IST).isoformat(), "event": event, **fields}
         try:
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, separators=(",", ":"), default=str) + "\n")
@@ -64,7 +57,6 @@ def sleep_until(target: datetime) -> None:
 
 
 def beep(pattern: str = "signal") -> None:
-    """Best-effort physical beep. Audio failure never kills the engine."""
     print("\a", end="", flush=True)
     try:
         import winsound
@@ -139,11 +131,7 @@ def market_return(data: dict[str, StockData]) -> float:
     return median(values) if values else 0.0
 
 
-def build_candidates(
-    data: dict[str, StockData],
-    sectors: dict[str, str],
-    cfg: StrategyConfig,
-) -> list[Candidate]:
+def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
     healthy = {
         symbol: d for symbol, d in data.items()
         if d.health.healthy and len(d.candles) == 15 and d.previous_close and d.ltp > 0
@@ -151,10 +139,8 @@ def build_candidates(
     mkt = market_return(healthy)
     gap_history = [
         100.0 * (d.candles[0].open / d.previous_close - 1.0)
-        for d in healthy.values()
-        if d.previous_close
+        for d in healthy.values() if d.previous_close
     ]
-
     peer_returns: dict[str, list[float]] = {}
     for symbol, d in healthy.items():
         sector = sectors.get(symbol)
@@ -162,32 +148,21 @@ def build_candidates(
             peer_returns.setdefault(sector, []).append(
                 100.0 * (d.candles[-1].close / d.candles[0].open - 1.0)
             )
-
     candidates: list[Candidate] = []
     for symbol, d in healthy.items():
-        stock_return = 100.0 * (d.candles[-1].close / d.candles[0].open - 1.0)
         sector = sectors.get(symbol)
         sector_return = median(peer_returns[sector]) if sector and peer_returns.get(sector) else mkt
         try:
-            candidates.extend(
-                evaluate_tiers(
-                    symbol=symbol,
-                    candles=d.candles,
-                    entry=d.ltp,
-                    previous_close=d.previous_close,
-                    market_return=mkt,
-                    sector_return=sector_return,
-                    gap_history=gap_history,
-                    cfg=cfg,
-                )
-            )
+            candidates.extend(evaluate_tiers(
+                symbol, d.candles, d.ltp, d.previous_close,
+                mkt, sector_return, gap_history, cfg,
+            ))
         except Exception as exc:
             print(f"[EVAL-WARN] {symbol}: {exc}", flush=True)
     return candidates
 
 
 def fetch_selected_ltp(client: PsygridClient, symbol: str) -> tuple[float, str]:
-    """Try the single-stock endpoint repeatedly for a fresh executable price."""
     deadline = time.monotonic() + ENTRY_GRACE_SECONDS
     last_error = "unknown"
     while time.monotonic() <= deadline:
@@ -209,14 +184,10 @@ def fetch_selected_ltp(client: PsygridClient, symbol: str) -> tuple[float, str]:
 
 
 def finalize_order(c: Candidate, entry: float, cfg: StrategyConfig) -> Candidate:
-    """Re-engineer the order around the actual 09:31 price without changing direction."""
     stop = c.stop
     reason = list(c.reasons)
     valid = entry > stop if c.side == "LONG" else entry < stop
     if not valid:
-        # Price crossed the frozen structural stop between 09:30 and 09:31.
-        # User requested a signal rather than a dead engine. Rebase the stop to
-        # a deterministic 0.35 ATR emergency distance and label it explicitly.
         emergency_distance = max(0.35 * c.atr_value, entry * cfg.minimum_risk_pct / 100.0)
         stop = entry - emergency_distance if c.side == "LONG" else entry + emergency_distance
         reason.append("EMERGENCY_STOP_REBASED_AT_09_31")
@@ -254,11 +225,8 @@ def preflight(client: PsygridClient, cfg: StrategyConfig) -> tuple[bool, str]:
 
 
 def run_self_test() -> int:
-    """Fast offline integrity test. No network and no market data required."""
     import unittest
-
-    loader = unittest.TestLoader()
-    suite = loader.discover("tests")
+    suite = unittest.defaultTestLoader.discover("tests")
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 10
 
@@ -294,17 +262,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.preflight_only:
         return 0 if ok else 21
     if not ok:
-        print("PREFLIGHT FAILED. The engine will retry before the live session starts.")
+        print("PREFLIGHT FAILED. The engine will retry during the live acquisition loop.")
 
     now = now_ist()
-    start = datetime.combine(today, SESSION_START, IST)
-    freeze = datetime.combine(today, SIGNAL_TIME, IST)
-    entry_time = datetime.combine(today, ENTRY_TIME, IST)
-
+    start = __import__('datetime').datetime.combine(today, SESSION_START, IST)
+    freeze = __import__('datetime').datetime.combine(today, SIGNAL_TIME, IST)
+    entry_time = __import__('datetime').datetime.combine(today, ENTRY_TIME, IST)
     if now >= entry_time:
         print("09:31 has already passed. Start this program before the opening session.")
         return 22
-
     if now < start:
         print(f"Waiting for {start:%H:%M:%S} IST ...")
         sleep_until(start)
@@ -321,12 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         cycle += 1
         try:
             raw = client.market()
-            parsed = {
-                symbol: client.stock(symbol, payload, now_ist())
-                for symbol, payload in raw.items()
-            }
-            # Keep a complete universe snapshot even when individual stocks are
-            # unhealthy. The engine must see all 450 and exclude bad records.
+            parsed = {symbol: client.stock(symbol, payload, now_ist()) for symbol, payload in raw.items()}
             if len(parsed) == cfg.universe_size:
                 last_full_snapshot = parsed
                 last_snapshot_at = now_ist()
@@ -342,13 +303,10 @@ def main(argv: list[str] | None = None) -> int:
             audit.event("ACQUISITION_ERROR", error=str(exc))
         time.sleep(cfg.poll_seconds)
 
-    # 09:30 is an unconditional event.
     beep("freeze")
     print(f"\n🔔 09:30 FREEZE BELL — {now_ist():%H:%M:%S.%f} IST")
     audit.event("FREEZE_BELL")
 
-    # One immediate final full-universe fetch gives us the freshest completed
-    # 09:15-09:29 dataset. If it fails, use the most recent verified full snapshot.
     try:
         raw = client.market()
         parsed = {s: client.stock(s, p, now_ist()) for s, p in raw.items()}
@@ -365,10 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         audit.event("FATAL_NO_SNAPSHOT")
         return 30
 
-    frozen = {
-        s: d for s, d in last_full_snapshot.items()
-        if d.health.healthy and len(d.candles) == 15
-    }
+    frozen = {s: d for s, d in last_full_snapshot.items() if d.health.healthy and len(d.candles) == 15}
     print(f"FROZEN: {len(frozen)}/450 stocks passed feed integrity")
     print(f"SNAPSHOT: {last_snapshot_at.isoformat() if last_snapshot_at else 'unknown'}")
     audit.event("SNAPSHOT_FROZEN", healthy=len(frozen), total=450)
@@ -387,25 +342,19 @@ def main(argv: list[str] | None = None) -> int:
 
     options = [c for c in (best_long, best_short) if c is not None]
     if not options:
-        print("FATAL: even the emergency tiers found no mathematically valid candidate while hard exclusions were respected.")
+        print("FATAL: emergency tiers found no valid candidate while hard exclusions were respected.")
         audit.event("FATAL_NO_CANDIDATE")
         return 31
 
-    selected = sorted(
-        options,
-        key=lambda c: (-c.score, c.tier, -c.rs_market, -c.rs_sector, c.symbol),
-    )[0]
+    selected = sorted(options, key=lambda c: (-c.score, c.tier, -c.rs_market, -c.rs_sector, c.symbol))[0]
     print_candidate("🔒 LOCKED SINGLE 09:31 CANDIDATE", selected)
     audit.event("CANDIDATE_LOCKED", candidate=asdict(selected))
 
-    print(f"Waiting for exact 09:31:00 IST ...")
+    print("Waiting for exact 09:31:00 IST ...")
     sleep_until(entry_time)
 
     live_ltp, source = fetch_selected_ltp(client, selected.symbol)
     if live_ltp <= 0:
-        # Availability of the stock endpoint is a data problem, not a reason to
-        # kill the decision. Use the verified 09:30 LTP as the final deterministic
-        # fallback and mark the source explicitly.
         frozen_ltp = frozen[selected.symbol].ltp
         if frozen_ltp <= 0:
             print("FATAL: selected symbol has no valid 09:30 fallback LTP.")
@@ -413,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             return 32
         live_ltp = frozen_ltp
         source = "FROZEN_09_30_LTP_FALLBACK"
-        print(f"[ENTRY-WARN] live 09:31 LTP unavailable: {source}")
+        print(f"[ENTRY-WARN] live 09:31 LTP unavailable: using {source}")
 
     final = finalize_order(selected, live_ltp, cfg)
     beep("signal")
@@ -435,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"WHY          : {' | '.join(final.reasons)}")
     print("#" * 88)
     print("STATUS: SIGNAL_READY")
-    print("NOTE: this is a deterministic research signal; it is not a guarantee of profit.")
+    print("NOTE: deterministic research signal; not a guarantee of profit.")
     audit.event("SIGNAL_READY", candidate=asdict(final), price_source=source)
     return 0
 

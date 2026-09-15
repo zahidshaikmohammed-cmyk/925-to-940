@@ -1,100 +1,63 @@
-# 09:25–09:40 Opening-Momentum + Relative-Strength Engine
+# 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 
-Deterministic Python strategy engine for the first 15 minutes after the opening phase of the NSE session.
+Local Python engine for NSE cash equities. **Psygrid remains the data source; this repository performs the strategy mathematics locally and ignores Psygrid's precomputed indicators.**
 
-## Objective
+## Exact operating sequence
 
-Continuously evaluate the configured liquid NIFTY 500 subset during **09:25–09:40 Asia/Kolkata**, rank only confirmed directional candidates, and **lock exactly Top 3 decisions at 09:40**. No selection changes are permitted after the 09:40 lock.
+- **09:15 onward:** continuously poll all ten PSYGRID A–J shards and maintain the 450-stock opening dataset.
+- **09:30:00:** play a terminal beep, take one atomic snapshot, and freeze the ranking.
+- The decision dataset is strictly the **15 completed 1-minute candles from 09:15 through 09:29**. The 09:30 candle is not used because it is not complete at 09:30:00.
+- Evaluate every healthy stock in both directions.
+- Produce **one best LONG and one best SHORT**.
+- **09:31:00:** refresh only the two selected symbols and print their live LTP as the executable entry reference.
 
-This repository is a strategy engine, not an order-execution system. It does not place orders, size positions, invent candles, or fabricate missing data.
+NSE's regular equity market opens at 09:15 IST. citeturn0search0
 
-## Data contract
+## Health layer
 
-The production source is PSYGRID. The engine expects genuine completed 1-minute OHLCV plus PSYGRID's native 15-minute, 1-hour and daily context. NIFTY benchmark data is required. Sector membership is supplied through `sector_map.json` or an equivalent adapter.
+A stock is removed from the 09:30 strategy run if its feed is stale, LTP is invalid/stale, any required 09:15–09:29 minute is missing, OHLC geometry is invalid, or previous close is unavailable. The engine does **not** abort because some stocks fail; it runs on the remaining healthy universe.
 
-The engine never interpolates or fills missing OHLCV.
+## Strategy mathematics
 
-## Decision timeline
+For each healthy stock and each direction:
 
-- 09:15–09:24: opening data accumulation.
-- 09:25–09:40: candidate evaluation on each newly completed 1-minute candle.
-- 09:40: final deterministic ranking and **Top 3 lock**.
-- After 09:40: decisions are immutable for the session.
+1. **Opening impulse:** from the 09:15 open to the directional extreme before 09:30.
+2. **Deep retracement:** after the extreme, measure the opposite excursion relative to the complete impulse. Required depth is 38%–70%.
+3. **Reclaim:** the final pre-09:30 close must recover at least 50% of the retracement leg.
+4. **Volume contraction:** mean retracement volume / mean impulse volume must be <= 0.80.
+5. **Directional efficiency:** absolute net impulse movement / total absolute close-to-close path must be >= 0.45.
+6. **VWAP:** price must be on the candidate side of our own session VWAP and not more than 2 ATR away.
+7. **Anti-chasing:** the directional extreme must not occur too late (bar 12+), impulse must not exceed 3.5 ATR, and an extreme impulse cannot remain glued to its extreme.
+8. **Gap filter:** absolute opening gap must be <= 3%; robust MAD z-score must be <= 3 when enough historical gap observations exist.
+9. **Persistence:** at least 60% of the 14 post-opening candle bodies must agree with the candidate direction.
+10. **Relative strength:** candidate-direction stock return must outperform the healthy-universe market median in the same direction.
+11. **Sector strength:** if `sector_map.json` is present, compare the stock with the median return of its mapped sector peers. Without that file, the engine uses the healthy-universe median as a transparent fallback proxy and prints a warning.
 
-## Direction
+## Ranking
 
-A stock can qualify LONG or SHORT. The directional signal is determined by the same mathematical feature set with sign symmetry.
+Score is deterministic and bounded to 0–100:
 
-## Hard gates
+`100 × (0.18 impulse + 0.24 retracement + 0.18 relative-strength + 0.10 volume + 0.10 VWAP + 0.10 structure + 0.10 volatility)`
 
-A candidate must satisfy all of these before scoring:
+No machine learning and no Psygrid MA/EMA/RSI/VWAP fields are used.
 
-1. Complete 09:15–09:24 opening history and valid NIFTY benchmark.
-2. Price and OHLCV data are finite and non-negative where applicable.
-3. Minimum liquidity/activity threshold is met.
-4. Opening directional move is at least 0.35% in absolute value.
-5. Stock relative strength versus NIFTY is at least 0.20 percentage points in the candidate direction.
-6. Sector relative strength versus the sector median is at least 0.10 percentage points in the candidate direction.
-7. Price is on the correct side of session VWAP.
-8. **Anti-chasing hard gate:** distance from VWAP must be <= 1.80 ATR(1m-equivalent), and price extension beyond the opening extreme must be <= 1.25 ATR(1m-equivalent).
-9. A directional 1-minute structure confirmation exists: opening-range break or higher-high/higher-low / lower-low/lower-high continuation.
-10. Higher-timeframe alignment: 15m and 1h trend signs must agree with the candidate direction.
-11. At least 3 post-09:25 directional observations exist and persistence is >= 0.60.
+## Risk levels
 
-**Top-3 integrity rule:** the engine locks Top 3 only when at least three candidates pass every hard gate. If fewer than three pass, it locks **NO TRADE** rather than manufacturing partial choices.
+The stop is structural:
 
-## Ranking score
+- LONG: retracement low − 0.35 × ATR
+- SHORT: retracement high + 0.35 × ATR
 
-Each gated candidate receives a 0–100 score:
+Target distance is `max(2 × risk, 1.5 × ATR)`. These are research defaults and must be backtested/paper-tested before live use.
 
-`Score = 100 * (0.22*M + 0.22*RS + 0.16*SECTOR + 0.14*RVOL + 0.10*VWAP + 0.08*STRUCTURE + 0.05*HTF + 0.03*PERSISTENCE)`
+## Run locally in PowerShell
 
-All component values are normalized to `[0, 1]` using fixed piecewise-linear clamps. No machine learning or adaptive thresholding is used in v1.
+```powershell
+cd path\to\925-to-940
+python -m pip install -r requirements.txt
+python main.py
+```
 
-- `M`: opening directional momentum.
-- `RS`: relative strength versus NIFTY.
-- `SECTOR`: relative strength versus sector median.
-- `RVOL`: relative activity/volume.
-- `VWAP`: distance and side-of-VWAP quality.
-- `STRUCTURE`: opening-range break/continuation quality.
-- `HTF`: 15m + 1h directional alignment.
-- `PERSISTENCE`: fraction of post-09:25 observations retaining the current direction.
+The program is intentionally a **signal engine**, not an order-execution bot.
 
-## Mathematical definitions
-
-For stock return `R_s` and NIFTY return `R_n`:
-
-`RS = R_s - R_n`
-
-For sector-median return `R_sec`:
-
-`SectorRS = R_s - R_sec`
-
-Opening return:
-
-`R_s = 100 * (C_09:24 / O_09:15 - 1)`
-
-Session VWAP:
-
-`VWAP = Σ(((H + L + C) / 3) * V) / ΣV`
-
-Persistence:
-
-`P = count(observations equal to current direction) / total eligible observations`
-
-Higher-timeframe trend is confirmed only when `Close > EMA20` and `EMA20(t) > EMA20(t-1)` for LONG; the exact mirror is required for SHORT. Otherwise HTF trend is neutral and the candidate fails the alignment gate.
-
-## Tie-breakers
-
-Ranks are deterministic:
-
-1. higher score;
-2. higher relative strength;
-3. higher sector relative strength;
-4. higher persistence;
-5. lower VWAP extension;
-6. lexicographically smaller symbol.
-
-## Important
-
-This is a mathematically explicit **research specification**, not a claim of profitability. It must be backtested and then paper-tested on genuine PSYGRID data before any live trading use.
+NSE Indices defines its sector classification as a four-level industry structure, so the optional `sector_map.json` is deliberately kept separate from strategy code and should be maintained from an authoritative classification source. citeturn2search1

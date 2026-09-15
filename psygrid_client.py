@@ -66,4 +66,5 @@ class PsygridClient:
         prev=None
         for r in self.candles(payload.get('15m',[])):
             if r.ts.date()<now.date() and r.ts.time()<=dtime(15,15):prev=r.close
+        if prev is None:reasons.append('missing_previous_close')
         health=Health(symbol,not reasons,';'.join(reasons)); return StockData(symbol,cs,ltp,prev,health)

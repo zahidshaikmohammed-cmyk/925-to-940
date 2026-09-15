@@ -20,4 +20,3 @@ jobs:
       - run: python -m compileall -q config.py strategy_930.py psygrid_client.py run_engine.py bbbbb.py tests/test_strategy_930.py
       - run: python -m unittest tests.test_strategy_930 -v
       - run: python bbbbb.py --self-test
-      - run: pytest -q tests/test_strategy_930.py

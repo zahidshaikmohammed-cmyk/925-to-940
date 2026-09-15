@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, time
 
-from strategy import CandidateSnapshot, CandidateState, Decision, SessionState, evaluate, rank_and_lock
+from strategy import IST, CandidateSnapshot, CandidateState, Decision, SessionState, evaluate, rank_and_lock
 
 EVALUATION_START = time(9, 25)
 LOCK_TIME = time(9, 40)
@@ -20,7 +20,7 @@ class OpeningEngine:
             raise RuntimeError("session already locked at 09:40")
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        local = now.astimezone(__import__("strategy").IST)
+        local = now.astimezone(IST)
         if local.time() < EVALUATION_START or local.time() > LOCK_TIME:
             raise ValueError("evaluation is allowed only from 09:25 through 09:40 IST")
         decision = evaluate(snapshot, self.session.candidates.setdefault(snapshot.symbol, CandidateState()))

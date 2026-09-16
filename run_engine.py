@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import datetime, time as dtime
 from pathlib import Path
@@ -66,6 +67,7 @@ def print_banner() -> None:
     print("Run at ANY market time | scans every AVAILABLE stock | LONG + SHORT | returns one #1")
     print("Target universe: 450 | failed/duplicate stocks are skipped | remaining healthy stocks are scored")
     print("Completed 1m candles available at runtime | live LTP | Tier 1 -> Tier 2 -> Tier 3")
+    print("Previous close is OPTIONAL metadata and never blocks signal generation")
     print("Tier 3 prevents strategic NO SIGNAL; feed integrity is enforced per stock, not globally")
     print("=" * 96)
 
@@ -107,21 +109,21 @@ def market_return(data: dict[str, StockData]) -> float:
 
 
 def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
+    # Previous close is deliberately absent from this eligibility rule.
     healthy = {
         symbol: d for symbol, d in data.items()
         if d.health.healthy
         and len(d.candles) >= cfg.min_completed_1m
-        and d.previous_close
         and d.ltp > 0
     }
     if not healthy:
         return []
 
     mkt = market_return(healthy)
-    gap_history = [
-        100.0 * (d.candles[0].open / d.previous_close - 1.0)
-        for d in healthy.values() if d.previous_close
-    ]
+    # Retained as an empty compatibility argument. Gap is no longer a signal
+    # feature because previous close is not guaranteed by the feed contract.
+    gap_history: list[float] = []
+
     peer_returns: dict[str, list[float]] = {}
     for symbol, d in healthy.items():
         sector = sectors.get(symbol)
@@ -163,6 +165,24 @@ def preflight(client: PsygridClient) -> tuple[bool, str]:
         return False, f"A-shard unavailable: {exc}"
 
 
+def health_failure_report(parsed: dict[str, StockData]) -> tuple[Counter, dict[str, list[str]]]:
+    counts: Counter = Counter()
+    examples: dict[str, list[str]] = defaultdict(list)
+    for symbol, d in parsed.items():
+        if d.health.healthy:
+            continue
+        reasons = [r for r in d.health.reason.split(";") if r]
+        for reason in reasons or ["unknown"]:
+            category = reason.split("_")[0] if False else reason
+            # Keep exact reason text for diagnosis; dynamic timestamp values
+            # are not currently emitted by the normal health checks except as
+            # a useful per-stock diagnostic.
+            counts[category] += 1
+            if len(examples[category]) < 5:
+                examples[category].append(symbol)
+    return counts, examples
+
+
 def run_self_test() -> int:
     import unittest
     suite = unittest.defaultTestLoader.discover("tests")
@@ -189,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     print_banner()
     now = now_ist()
     today = now.date()
-    audit.event("ENGINE_START", base_url=args.base_url, mode="ANY_TIME_SCAN_PARTIAL_TOLERANT")
+    audit.event("ENGINE_START", base_url=args.base_url, mode="ANY_TIME_SCAN_INTRADAY_NO_PREVIOUS_CLOSE")
 
     if not is_trading_day(today):
         print(f"NOT A NORMAL NSE EQUITY TRADING DAY: {today.isoformat()}")
@@ -231,9 +251,15 @@ def main(argv: list[str] | None = None) -> int:
     if not sectors:
         print("SECTOR MAP   : absent -> sector RS benchmark uses healthy-universe median")
 
+    failure_counts, failure_examples = health_failure_report(parsed)
+    if failure_counts:
+        print("HEALTH FAILURES:")
+        for reason, count in failure_counts.most_common():
+            print(f"  {reason:<35}: {count} | examples={', '.join(failure_examples[reason])}")
+
     if not healthy:
-        print("FATAL: zero healthy stocks. There is nothing valid to score.")
-        audit.event("FATAL_NO_HEALTHY_STOCKS")
+        print("FATAL: zero healthy stocks. No fake signal will be invented.")
+        audit.event("FATAL_NO_HEALTHY_STOCKS", failure_reasons=dict(failure_counts))
         return 31
 
     candidates = build_candidates(parsed, sectors, cfg)

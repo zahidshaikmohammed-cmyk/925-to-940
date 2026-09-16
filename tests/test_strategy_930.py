@@ -169,10 +169,11 @@ class StrategyTests(unittest.TestCase):
         cs = late_session_retrace_fixture()
         gate_only_cfg = replace(
             self.cfg,
+            # This test isolates the late-session search behavior; the fixture
+            # deliberately has a larger impulse than production's normal cap.
+            max_impulse_atr=5.0,
             max_retracement_volume_ratio=2.0,
             min_persistence=0.40,
-            require_vwap_confirmation=False,
-            maximum_risk_pct=10.0,
         )
         candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], gate_only_cfg)
         self.assertTrue(candidates)

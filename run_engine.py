@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, time as dtime
 from pathlib import Path
@@ -10,7 +11,7 @@ from statistics import median
 from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
-from psygrid_client import PsygridClient, StockData
+from psygrid_client import PsygridClient, SHARDS, StockData
 from strategy_930 import Candidate, evaluate_tiers
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -109,7 +110,6 @@ def market_return(data: dict[str, StockData]) -> float:
 
 
 def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
-    # Previous close is deliberately absent from this eligibility rule.
     healthy = {
         symbol: d for symbol, d in data.items()
         if d.health.healthy
@@ -120,8 +120,6 @@ def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: S
         return []
 
     mkt = market_return(healthy)
-    # Retained as an empty compatibility argument. Gap is no longer a signal
-    # feature because previous close is not guaranteed by the feed contract.
     gap_history: list[float] = []
 
     peer_returns: dict[str, list[float]] = {}
@@ -157,12 +155,51 @@ def select_global_best(candidates: list[Candidate]) -> Candidate | None:
     )[0]
 
 
-def preflight(client: PsygridClient) -> tuple[bool, str]:
-    try:
-        shard = client.ping()
-        return True, f"A-shard OK ({shard.get('stock_count')}/45)"
-    except Exception as exc:
-        return False, f"A-shard unavailable: {exc}"
+def preflight(client: PsygridClient) -> tuple[bool, dict[str, dict]]:
+    """Probe all ten public shards and report each result independently."""
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
+        futures = {executor.submit(client._get, f"public/{shard}"): shard for shard in SHARDS}
+        for future in as_completed(futures):
+            shard = futures[future]
+            try:
+                payload = future.result()
+                if not isinstance(payload, dict):
+                    results[shard] = {"ok": False, "count": 0, "error": "payload is not an object"}
+                    continue
+                stocks = payload.get("stocks")
+                if not isinstance(stocks, dict):
+                    results[shard] = {"ok": False, "count": 0, "error": "missing/invalid stocks object"}
+                    continue
+                count = len(stocks)
+                declared = payload.get("stock_count")
+                ok = count == 45 and declared == 45
+                results[shard] = {
+                    "ok": ok,
+                    "count": count,
+                    "declared": declared,
+                    "error": None if ok else f"declared={declared}, records={count}, expected=45",
+                }
+            except Exception as exc:
+                results[shard] = {"ok": False, "count": 0, "error": str(exc)}
+    ordered = {shard: results.get(shard, {"ok": False, "count": 0, "error": "no result"}) for shard in SHARDS}
+    return all(item["ok"] for item in ordered.values()), ordered
+
+
+def print_preflight(results: dict[str, dict]) -> None:
+    print("PREFLIGHT — ALL PUBLIC SHARDS:")
+    ok_count = 0
+    record_count = 0
+    for shard, result in results.items():
+        label = shard.replace("live-", "").replace(".json", "").upper()
+        record_count += int(result.get("count", 0))
+        if result.get("ok"):
+            ok_count += 1
+            print(f"  SHARD {label}: OK {result.get('count')}/45")
+        else:
+            print(f"  SHARD {label}: FAILED — {result.get('error')}")
+    print(f"  SHARDS: {ok_count}/{len(results)} healthy")
+    print(f"  RAW RECORDS: {record_count}")
 
 
 def health_failure_report(parsed: dict[str, StockData]) -> tuple[Counter, dict[str, list[str]]]:
@@ -173,13 +210,9 @@ def health_failure_report(parsed: dict[str, StockData]) -> tuple[Counter, dict[s
             continue
         reasons = [r for r in d.health.reason.split(";") if r]
         for reason in reasons or ["unknown"]:
-            category = reason.split("_")[0] if False else reason
-            # Keep exact reason text for diagnosis; dynamic timestamp values
-            # are not currently emitted by the normal health checks except as
-            # a useful per-stock diagnostic.
-            counts[category] += 1
-            if len(examples[category]) < 5:
-                examples[category].append(symbol)
+            counts[reason] += 1
+            if len(examples[reason]) < 5:
+                examples[reason].append(symbol)
     return counts, examples
 
 
@@ -193,7 +226,7 @@ def run_self_test() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PSYGRID any-time 450-stock scanner")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
-    parser.add_argument("--preflight-only", action="store_true", help="inspect feed coverage and exit")
+    parser.add_argument("--preflight-only", action="store_true", help="inspect all ten public shards and exit")
     parser.add_argument("--base-url", default=BASE_URL)
     args = parser.parse_args(argv)
 
@@ -221,9 +254,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Market session is closed. Last live scan window ended at {MARKET_CLOSE.strftime('%H:%M')} IST.")
         return 23
 
-    ok, message = preflight(client)
-    print(f"PREFLIGHT: {message}")
-    audit.event("PREFLIGHT", ok=ok, message=message)
+    preflight_ok, preflight_results = preflight(client)
+    print_preflight(preflight_results)
+    audit.event("PREFLIGHT", ok=preflight_ok, shards=preflight_results)
+    if args.preflight_only:
+        return 0 if preflight_ok else 21
 
     try:
         raw = client.market()

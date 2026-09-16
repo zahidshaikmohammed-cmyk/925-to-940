@@ -69,6 +69,7 @@ def print_banner() -> None:
     print("Target universe: 450 | failed/duplicate stocks are skipped | remaining healthy stocks are scored")
     print("Completed 1m candles available at runtime | live LTP | Tier 1 -> Tier 2 -> Tier 3")
     print("Previous close is OPTIONAL metadata and never blocks signal generation")
+    print("Rolling impulse/retracement geometry + rolling relative strength are used for rescans")
     print("Tier 3 prevents strategic NO SIGNAL; feed integrity is enforced per stock, not globally")
     print("=" * 96)
 
@@ -100,9 +101,16 @@ def print_candidate(title: str, c: Candidate | None) -> None:
     print(f"REASONS      : {' | '.join(c.reasons)}")
 
 
+def rolling_return(d: StockData, bars: int = 12) -> float:
+    cs = d.candles[-bars:]
+    if len(cs) < 2 or cs[0].open <= 0:
+        return 0.0
+    return 100.0 * (cs[-1].close / cs[0].open - 1.0)
+
+
 def market_return(data: dict[str, StockData]) -> float:
     values = [
-        100.0 * (d.candles[-1].close / d.candles[0].open - 1.0)
+        rolling_return(d)
         for d in data.values()
         if d.health.healthy and len(d.candles) >= 5
     ]
@@ -126,9 +134,7 @@ def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: S
     for symbol, d in healthy.items():
         sector = sectors.get(symbol)
         if sector:
-            peer_returns.setdefault(sector, []).append(
-                100.0 * (d.candles[-1].close / d.candles[0].open - 1.0)
-            )
+            peer_returns.setdefault(sector, []).append(rolling_return(d))
 
     candidates: list[Candidate] = []
     for symbol, d in healthy.items():

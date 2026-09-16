@@ -4,7 +4,7 @@ import gzip
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,8 @@ from strategy_930 import Candle
 
 IST = ZoneInfo("Asia/Kolkata")
 SHARDS = tuple(f"live-{x}.json" for x in "abcdefghij")
+SESSION_START = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,7 @@ class PsygridClient:
                 "Accept-Encoding": "gzip",
                 "Cache-Control": "no-cache, no-store, max-age=0",
                 "Pragma": "no-cache",
-                "User-Agent": "PSYGRID-925-TO-940/1.0",
+                "User-Agent": "PSYGRID-925-TO-940/2.0",
             },
         )
         with urlopen(req, timeout=self.timeout) as response:
@@ -53,7 +55,6 @@ class PsygridClient:
             return json.loads(body.decode("utf-8"))
 
     def ping(self) -> dict:
-        """Fetch one public shard as a low-cost connectivity preflight."""
         payload = self._get("public/live-a.json")
         if not isinstance(payload, dict):
             raise RuntimeError("live-a.json is not a JSON object")
@@ -62,7 +63,7 @@ class PsygridClient:
         return payload
 
     def market(self) -> dict:
-        """Fetch all ten 45-stock shards concurrently and require exact 450 coverage."""
+        """Fetch all ten 45-stock shards and require exact 450 unique coverage."""
         out: dict = {}
         errors: list[str] = []
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -117,9 +118,15 @@ class PsygridClient:
         return tuple(sorted(out, key=lambda c: c.ts))
 
     def stock(self, symbol: str, payload: dict, now: datetime | None = None) -> StockData:
+        """Build a live snapshot containing every completed 1m candle today.
+
+        The old engine hard-coded the 09:15-09:29 opening grid. The new scanner
+        deliberately exposes the completed session available at *now*, so the
+        same strategy can be run at 09:20, 10:45, 13:10, etc.
+        """
         now = now or datetime.now(IST)
         reasons: list[str] = []
-        candles = self.candles(payload.get("1m", []))
+        all_candles = self.candles(payload.get("1m", []))
 
         try:
             ltp = float(payload.get("ltp") or 0.0)
@@ -141,42 +148,32 @@ class PsygridClient:
             except Exception:
                 reasons.append("invalid_ltp_timestamp")
 
-        expected = {
-            datetime.combine(now.date(), dtime(9, 15 + i), IST)
-            for i in range(15)
-        }
-        got = {
-            c.ts.replace(second=0, microsecond=0)
-            for c in candles
-            if c.ts.date() == now.date() and dtime(9, 15) <= c.ts.time() < dtime(9, 30)
-        }
-        if len(got) != 15 or not expected.issubset(got):
-            reasons.append("missing_09_15_to_09_29_grid")
-
-        opening = tuple(
-            c for c in candles
-            if c.ts.date() == now.date() and dtime(9, 15) <= c.ts.time() < dtime(9, 30)
+        session = tuple(
+            c for c in all_candles
+            if c.ts.date() == now.date()
+            and SESSION_START <= c.ts.time() < MARKET_CLOSE
+            and c.ts <= now.replace(second=59, microsecond=999999)
         )
+        if len(session) < 5:
+            reasons.append(f"insufficient_completed_1m_{len(session)}")
 
-        # Psygrid now exposes previous_close explicitly. Use it as the primary
-        # source because it is a session-level value, not an inferred 15m close.
         previous_close = payload.get("previous_close")
         try:
             previous_close = float(previous_close) if previous_close is not None else None
         except (TypeError, ValueError):
             previous_close = None
 
-        # Compatibility fallback for an older Psygrid build.
         if previous_close is None:
             for candle in self.candles(payload.get("15m", [])):
                 if candle.ts.date() < now.date() and candle.ts.time() <= dtime(15, 30):
                     previous_close = candle.close
+                    break
         if previous_close is None or previous_close <= 0:
             reasons.append("missing_previous_close")
 
         return StockData(
             symbol=symbol,
-            candles=opening,
+            candles=session,
             ltp=ltp,
             previous_close=previous_close,
             health=Health(symbol, not reasons, ";".join(reasons)),

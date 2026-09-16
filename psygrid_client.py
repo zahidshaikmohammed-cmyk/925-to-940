@@ -14,7 +14,13 @@ IST = ZoneInfo("Asia/Kolkata")
 SHARDS = tuple(f"live-{x}.json" for x in "abcdefghij")
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
-MAX_CANDLE_FRESHNESS_SECONDS = 90.0
+
+# Feed freshness is intentionally measured against the local PC clock. A few
+# seconds of publication/network delay is normal and must NOT invalidate a
+# stock. Only a materially stale snapshot (>4 minutes) is rejected.
+MAX_LTP_AGE_SECONDS = 240.0
+MAX_CANDLE_FRESHNESS_SECONDS = 240.0
+MAX_FUTURE_SKEW_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -176,9 +182,9 @@ class PsygridClient:
         """Build a live snapshot containing completed 1m candles today.
 
         Previous close is optional metadata. It is never a feed-health gate.
-        If the feed does not publish an LTP timestamp, the newest completed
-        1-minute candle is used as a bounded freshness proxy instead of
-        rejecting an otherwise usable live stock snapshot.
+        A normal few-second LTP/network delay is tolerated. A stock is marked
+        stale only when the snapshot is more than four minutes behind the local
+        PC clock.
         """
         now = now or datetime.now(IST)
         now_ist = now.astimezone(IST)
@@ -194,25 +200,21 @@ class PsygridClient:
 
         ltp_timestamp = payload.get("ltp_timestamp")
         if not ltp_timestamp:
-            # Some public snapshots omit ltp_timestamp even though the
-            # WebSocket-built 1m stream is current. Do not fabricate a time;
-            # use the latest completed candle timestamp as the freshness
-            # boundary, with a deliberately conservative 90-second limit.
             latest = all_candles[-1].ts if all_candles else None
             if latest is None:
                 reasons.append("missing_ltp_timestamp_and_no_completed_candle")
             else:
                 candle_age = (now_ist - latest).total_seconds()
-                if candle_age < -5:
+                if candle_age < -MAX_FUTURE_SKEW_SECONDS:
                     reasons.append(f"future_latest_candle_{candle_age:.1f}s")
                 elif candle_age > MAX_CANDLE_FRESHNESS_SECONDS:
                     reasons.append(f"stale_completed_candle_{candle_age:.1f}s")
         else:
             try:
                 age = (now_ist - self._ts(ltp_timestamp)).total_seconds()
-                if age < -5:
+                if age < -MAX_FUTURE_SKEW_SECONDS:
                     reasons.append(f"future_ltp_timestamp_{age:.1f}s")
-                elif age > 10:
+                elif age > MAX_LTP_AGE_SECONDS:
                     reasons.append(f"stale_ltp_{age:.1f}s")
             except Exception:
                 reasons.append("invalid_ltp_timestamp")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time as dtime
+from datetime import datetime
 from math import isfinite
 from statistics import median
 from typing import Iterable
@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 from config import StrategyConfig
 
 IST = ZoneInfo("Asia/Kolkata")
-CUTOFF = dtime(9, 30)
 
 
 @dataclass(frozen=True)
@@ -163,16 +162,16 @@ def _emergency_candidate(
     sector_return: float,
     cfg: StrategyConfig,
 ) -> Candidate | None:
-    """Tier 3: deterministic last-resort candidate for a healthy feed.
+    """Tier 3: deterministic candidate from a healthy live snapshot.
 
-    Tier 1/2 are pattern gates. Tier 3 is deliberately NOT a pattern gate: once
-    the feed is valid, the engine must still be able to select a direction.
-    Extreme gap/extension/exhaustion are scored as penalties, not vetoes, so a
-    healthy universe can never produce an artificial 'NO SIGNAL' merely because
-    a strategy threshold was too restrictive.
+    Tier 1/2 are pattern-gated. Tier 3 is deliberately not a NO-SIGNAL gate:
+    when the 450-stock feed is healthy, every stock still contributes a
+    directional LONG/SHORT hypothesis and the global scanner can select #1.
+    Extreme conditions reduce the score rather than creating a fake missing
+    candidate. Data-integrity failures remain fatal and are never fabricated.
     """
     a = atr(cs, cfg.atr_period)
-    if a <= 0 or entry <= 0 or previous_close <= 0:
+    if a <= 0 or entry <= 0 or previous_close <= 0 or len(cs) < cfg.min_completed_1m:
         return None
 
     start = cs[0].open
@@ -187,7 +186,12 @@ def _emergency_candidate(
     vw_dist = side * (last - vw) / a
     eff = efficiency(cs)
     recent_move = side * (last - cs[-4].close) / a
-    directional_score = clamp(0.5 + 0.20 * impulse / max(1.0, abs(impulse)) + 0.20 * clamp(recent_move / 2.0) + 0.10 * clamp(vw_dist / 2.0))
+    directional_score = clamp(
+        0.5
+        + 0.20 * impulse / max(1.0, abs(impulse))
+        + 0.20 * clamp(recent_move / 2.0)
+        + 0.10 * clamp(vw_dist / 2.0)
+    )
     rs_score = clamp(0.5 + 0.15 * rs + 0.10 * srs)
     structure_score = clamp(0.5 * clamp(eff) + 0.5 * directional_score)
 
@@ -216,6 +220,7 @@ def _emergency_candidate(
     reasons = (
         "FORCED_ENTRY_TIER_3",
         "PATTERN_GATES_BYPASSED_AFTER_TIER_1_2_FAILURE",
+        f"session_candles={len(cs)}",
         f"directional_score={directional_score:.3f}",
         f"gap={gap:+.3f}%",
         f"move_atr={move_atr:.3f}",
@@ -287,7 +292,7 @@ def _build_candidate(
     eff = efficiency(impulse_bars)
     vw_dist = side * (cs[-1].close - vw) / a
     extension = abs(cs[-1].close - vw) / a
-    persistence = sum(1 for c in cs[1:] if side * (c.close - c.open) > 0) / 14.0
+    persistence = sum(1 for c in cs[1:] if side * (c.close - c.open) > 0) / max(len(cs) - 1, 1)
 
     if abs(gap) > cfg.max_gap_pct or abs(gap_z) > cfg.max_gap_z:
         return None
@@ -358,6 +363,7 @@ def _build_candidate(
     target = entry + side * target_distance
     reasons = (
         "STRICT" if tier == 1 else f"FALLBACK_TIER_{tier}",
+        f"session_candles={len(cs)}",
         f"depth={depth:.3f}",
         f"reclaim={reclaim:.3f}",
         f"impulse_atr={impulse_atr:.3f}",
@@ -399,11 +405,10 @@ def evaluate(
     cfg: StrategyConfig,
     tier: int = 1,
 ):
-    cs = sorted(
-        [c for c in candles if c.ts.astimezone(IST).time() < CUTOFF],
-        key=lambda c: c.ts,
-    )[-15:]
-    if len(cs) != 15 or any(not finite_ohlcv(c) for c in cs):
+    # Evaluate every completed session candle supplied by the live feed.
+    # There is no 09:30 cutoff and no artificial 15-candle cap anymore.
+    cs = sorted(list(candles), key=lambda c: c.ts)
+    if len(cs) < cfg.min_completed_1m or any(not finite_ohlcv(c) for c in cs):
         return None
     if previous_close <= 0 or entry <= 0:
         return None

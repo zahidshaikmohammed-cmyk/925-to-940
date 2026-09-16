@@ -4,7 +4,7 @@ import gzip
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -36,6 +36,9 @@ class PsygridClient:
     def __init__(self, base_url: str, timeout: float = 4.0):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
+        self.last_market_errors: tuple[str, ...] = ()
+        self.last_market_coverage: int = 0
+        self.last_market_duplicates: tuple[str, ...] = ()
 
     def _get(self, path: str):
         req = Request(
@@ -63,28 +66,57 @@ class PsygridClient:
         return payload
 
     def market(self) -> dict:
-        """Fetch all ten 45-stock shards and require exact 450 unique coverage."""
+        """Fetch all shards and keep every valid unique stock that is available.
+
+        A broken shard, malformed stock payload, or duplicate symbol no longer
+        invalidates the entire scan. The affected item is skipped and the
+        remaining unique stocks are returned for scoring.
+        """
         out: dict = {}
         errors: list[str] = []
+        duplicates: list[str] = []
+
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(self._get, f"public/{s}"): s for s in SHARDS}
             for future in as_completed(futures):
                 shard = futures[future]
                 try:
                     payload = future.result()
+                    if not isinstance(payload, dict):
+                        errors.append(f"{shard}: payload is not an object")
+                        continue
                     stocks = payload.get("stocks")
-                    if payload.get("stock_count") != 45 or not isinstance(stocks, dict):
-                        raise RuntimeError(f"{shard}: invalid shard")
-                    overlap = set(out) & set(stocks)
-                    if overlap:
-                        raise RuntimeError(f"{shard}: duplicate symbols {sorted(overlap)[:5]}")
-                    out.update(stocks)
+                    if not isinstance(stocks, dict):
+                        errors.append(f"{shard}: missing/invalid stocks object")
+                        continue
+                    declared = payload.get("stock_count")
+                    if declared != 45:
+                        errors.append(f"{shard}: declared stock_count={declared}, expected 45; valid records retained")
+
+                    for symbol, stock in stocks.items():
+                        if not isinstance(symbol, str) or not symbol.strip():
+                            errors.append(f"{shard}: invalid blank symbol skipped")
+                            continue
+                        if symbol in out:
+                            duplicates.append(symbol)
+                            continue
+                        if not isinstance(stock, dict):
+                            errors.append(f"{shard}: {symbol}: invalid stock payload skipped")
+                            continue
+                        out[symbol] = stock
                 except Exception as exc:
                     errors.append(f"{shard}: {exc}")
+
+        self.last_market_errors = tuple(errors)
+        self.last_market_duplicates = tuple(sorted(set(duplicates)))
+        self.last_market_coverage = len(out)
+
         if errors:
-            raise RuntimeError(" | ".join(errors))
-        if len(out) != 450:
-            raise RuntimeError(f"expected exactly 450 stocks, got {len(out)}")
+            print(f"[FEED-WARN] {len(errors)} shard/record issue(s); affected items skipped")
+        if duplicates:
+            print(f"[FEED-WARN] {len(set(duplicates))} duplicate symbol(s); duplicate copies skipped")
+        if not out:
+            raise RuntimeError("all shards failed or returned no valid stocks")
         return out
 
     @staticmethod
@@ -118,12 +150,7 @@ class PsygridClient:
         return tuple(sorted(out, key=lambda c: c.ts))
 
     def stock(self, symbol: str, payload: dict, now: datetime | None = None) -> StockData:
-        """Build a live snapshot containing every completed 1m candle today.
-
-        The old engine hard-coded the 09:15-09:29 opening grid. The new scanner
-        deliberately exposes the completed session available at *now*, so the
-        same strategy can be run at 09:20, 10:45, 13:10, etc.
-        """
+        """Build a live snapshot containing every completed 1m candle today."""
         now = now or datetime.now(IST)
         reasons: list[str] = []
         all_candles = self.candles(payload.get("1m", []))

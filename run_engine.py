@@ -21,9 +21,8 @@ NSE_HOLIDAYS_2026 = {
     "2026-01-15", "2026-01-26", "2026-02-19", "2026-03-03",
     "2026-03-19", "2026-03-26", "2026-03-31", "2026-04-01",
     "2026-04-03", "2026-04-14", "2026-05-01", "2026-05-28",
-    "2026-06-26", "2026-08-26", "2026-09-14", "2026-10-02",
-    "2026-10-20", "2026-11-08", "2026-11-10", "2026-11-24",
-    "2026-12-25",
+    "2026-06-26", "2026-08-26", "2026-10-02", "2026-10-20",
+    "2026-11-08", "2026-11-10", "2026-11-24", "2026-12-25",
 }
 
 
@@ -61,19 +60,20 @@ def is_trading_day(day) -> bool:
 
 
 def print_banner() -> None:
-    print("=" * 92)
+    print("=" * 96)
     print("PSYGRID // 450-STOCK INTRADAY #1 DETERMINISTIC SCANNER")
-    print("=" * 92)
-    print("Run at ANY market time | scans all 450 | LONG + SHORT hypotheses | returns one #1")
+    print("=" * 96)
+    print("Run at ANY market time | scans every AVAILABLE stock | LONG + SHORT | returns one #1")
+    print("Target universe: 450 | failed/duplicate stocks are skipped | remaining healthy stocks are scored")
     print("Completed 1m candles available at runtime | live LTP | Tier 1 -> Tier 2 -> Tier 3")
-    print("Tier 3 prevents strategic NO SIGNAL; feed integrity still cannot be bypassed")
-    print("=" * 92)
+    print("Tier 3 prevents strategic NO SIGNAL; feed integrity is enforced per stock, not globally")
+    print("=" * 96)
 
 
 def print_candidate(title: str, c: Candidate | None) -> None:
-    print("\n" + "-" * 92)
+    print("\n" + "-" * 96)
     print(title)
-    print("-" * 92)
+    print("-" * 96)
     if c is None:
         print("NONE")
         return
@@ -106,11 +106,7 @@ def market_return(data: dict[str, StockData]) -> float:
     return median(values) if values else 0.0
 
 
-def build_candidates(
-    data: dict[str, StockData],
-    sectors: dict[str, str],
-    cfg: StrategyConfig,
-) -> list[Candidate]:
+def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
     healthy = {
         symbol: d for symbol, d in data.items()
         if d.health.healthy
@@ -118,12 +114,14 @@ def build_candidates(
         and d.previous_close
         and d.ltp > 0
     }
+    if not healthy:
+        return []
+
     mkt = market_return(healthy)
     gap_history = [
         100.0 * (d.candles[0].open / d.previous_close - 1.0)
         for d in healthy.values() if d.previous_close
     ]
-
     peer_returns: dict[str, list[float]] = {}
     for symbol, d in healthy.items():
         sector = sectors.get(symbol)
@@ -147,12 +145,6 @@ def build_candidates(
 
 
 def select_global_best(candidates: list[Candidate]) -> Candidate | None:
-    """Select #1 with tier quality first, then deterministic score ordering.
-
-    A Tier 1 pattern is preferred over Tier 2, and Tier 2 over Tier 3. Within
-    the best available tier, score is the primary ranking criterion. Therefore
-    Tier 3 only becomes the global #1 when no Tier 1/2 candidate exists.
-    """
     if not candidates:
         return None
     best_tier = min(c.tier for c in candidates)
@@ -163,12 +155,12 @@ def select_global_best(candidates: list[Candidate]) -> Candidate | None:
     )[0]
 
 
-def preflight(client: PsygridClient, cfg: StrategyConfig) -> tuple[bool, str]:
+def preflight(client: PsygridClient) -> tuple[bool, str]:
     try:
         shard = client.ping()
         return True, f"A-shard OK ({shard.get('stock_count')}/45)"
     except Exception as exc:
-        return False, f"A-shard FAILED: {exc}"
+        return False, f"A-shard unavailable: {exc}"
 
 
 def run_self_test() -> int:
@@ -181,7 +173,7 @@ def run_self_test() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PSYGRID any-time 450-stock scanner")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
-    parser.add_argument("--preflight-only", action="store_true", help="validate the live 450-stock feed and exit")
+    parser.add_argument("--preflight-only", action="store_true", help="inspect feed coverage and exit")
     parser.add_argument("--base-url", default=BASE_URL)
     args = parser.parse_args(argv)
 
@@ -197,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     print_banner()
     now = now_ist()
     today = now.date()
-    audit.event("ENGINE_START", base_url=args.base_url, mode="ANY_TIME_SCAN")
+    audit.event("ENGINE_START", base_url=args.base_url, mode="ANY_TIME_SCAN_PARTIAL_TOLERANT")
 
     if not is_trading_day(today):
         print(f"NOT A NORMAL NSE EQUITY TRADING DAY: {today.isoformat()}")
@@ -209,50 +201,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Market session is closed. Last live scan window ended at {MARKET_CLOSE.strftime('%H:%M')} IST.")
         return 23
 
-    ok, message = preflight(client, cfg)
+    ok, message = preflight(client)
     print(f"PREFLIGHT: {message}")
     audit.event("PREFLIGHT", ok=ok, message=message)
-    if args.preflight_only:
-        if not ok:
-            return 21
-        try:
-            raw = client.market()
-            print(f"FULL UNIVERSE OK ({len(raw)}/450)")
-            return 0 if len(raw) == cfg.universe_size else 21
-        except Exception as exc:
-            print(f"FULL UNIVERSE FAILED: {exc}")
-            return 21
-    if not ok:
-        print("FATAL: live feed preflight failed. No fabricated 450-stock scan will be produced.")
-        audit.event("FATAL_PREFLIGHT", message=message)
-        return 21
 
-    scan_time = now_ist()
     try:
         raw = client.market()
     except Exception as exc:
-        print(f"FATAL: 450-stock universe assembly failed: {exc}")
-        print("The scanner will not silently score a partial or duplicated universe.")
-        audit.event("FATAL_UNIVERSE", error=str(exc))
+        print(f"FATAL: no usable stock feed returned: {exc}")
+        audit.event("FATAL_NO_USABLE_FEED", error=str(exc))
         return 30
 
-    if len(raw) != cfg.universe_size:
-        print(f"FATAL: expected 450 unique stocks, received {len(raw)}")
-        audit.event("FATAL_UNIVERSE_SIZE", received=len(raw))
-        return 30
-
+    scan_time = now_ist()
     parsed = {symbol: client.stock(symbol, payload, scan_time) for symbol, payload in raw.items()}
     healthy = {s: d for s, d in parsed.items() if d.health.healthy}
-    insufficient = cfg.min_completed_1m
+    unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
+
     print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S.%f} IST")
-    print(f"UNIVERSE     : {len(parsed)}/450 unique stocks")
-    print(f"HEALTHY      : {len(healthy)}/450")
-    print(f"MIN CANDLES  : {insufficient} completed 1m candles")
+    print(f"UNIVERSE     : {len(parsed)}/450 unique stocks received")
+    print(f"HEALTHY      : {len(healthy)}")
+    print(f"SKIPPED      : {len(unhealthy)} stock(s) failed per-stock feed checks")
+    print(f"SHARD ISSUES : {len(client.last_market_errors)}")
+    print(f"DUPLICATES   : {len(client.last_market_duplicates)}")
+    if client.last_market_errors:
+        for item in client.last_market_errors[:10]:
+            print(f"  - {item}")
+    if client.last_market_duplicates:
+        print(f"  duplicate symbols (first 10): {', '.join(client.last_market_duplicates[:10])}")
     if not sectors:
         print("SECTOR MAP   : absent -> sector RS benchmark uses healthy-universe median")
 
     if not healthy:
-        print("FATAL: zero healthy stocks. No fake signal will be invented.")
+        print("FATAL: zero healthy stocks. There is nothing valid to score.")
         audit.event("FATAL_NO_HEALTHY_STOCKS")
         return 31
 
@@ -264,11 +244,11 @@ def main(argv: list[str] | None = None) -> int:
 
     selected = select_global_best(candidates)
     if selected is None:
-        print("FATAL: healthy feed produced no directional hypothesis. This should only occur if the feed is incomplete or invalid.")
-        audit.event("FATAL_NO_CANDIDATE", healthy=len(healthy))
+        print("FATAL: no directional hypothesis could be calculated from the available data.")
+        audit.event("FATAL_NO_CANDIDATE", healthy=len(healthy), received=len(parsed))
         return 32
 
-    print_candidate("🏆 #1 BEST SIGNAL ACROSS ALL 450", selected)
+    print_candidate("🏆 #1 BEST SIGNAL FROM AVAILABLE HEALTHY STOCKS", selected)
     print("\nSTATUS: SIGNAL_READY")
     print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
@@ -277,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
         scan_time=scan_time.isoformat(),
         universe=len(parsed),
         healthy=len(healthy),
+        skipped=len(unhealthy),
+        shard_issues=len(client.last_market_errors),
+        duplicates=len(client.last_market_duplicates),
         candidate_count=len(candidates),
         selected=asdict(selected),
     )

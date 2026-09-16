@@ -117,10 +117,10 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(with_close.stop, without_close.stop, places=9)
         self.assertAlmostEqual(with_close.target, without_close.target, places=9)
 
-    def test_psygrid_missing_previous_close_keeps_stock_healthy(self):
+    def test_psygrid_canonical_1m_ohlcv_is_healthy_without_ltp_fields(self):
         rows = []
         start = datetime(2026, 9, 16, 9, 15, tzinfo=IST)
-        for i in range(5):
+        for i in range(6):
             price = 100.0 + i
             rows.append({
                 "timestamp": (start + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S IST"),
@@ -131,18 +131,42 @@ class StrategyTests(unittest.TestCase):
                 "volume": 1000,
             })
         payload = {
-            "ltp": 105.0,
-            "ltp_timestamp": "2026-09-16 09:20:04 IST",
-            "1m": rows,
-            "5m": [],
-            "15m": [],
+            "symbol": "TEST",
+            "security_id": "1",
+            "candles_1m": rows,
         }
         d = PsygridClient("http://example.invalid").stock(
             "TEST", payload, datetime(2026, 9, 16, 9, 20, 5, tzinfo=IST)
         )
         self.assertTrue(d.health.healthy, d.health.reason)
         self.assertIsNone(d.previous_close)
+        self.assertEqual(d.ltp, 105.3)
         self.assertEqual(len(d.candles), 5)
+        self.assertNotIn("stale", d.health.reason)
+
+    def test_old_ltp_timestamp_is_ignored_when_endpoint_has_1m_ohlcv(self):
+        start = datetime(2026, 9, 16, 9, 15, tzinfo=IST)
+        rows = [
+            {
+                "timestamp": (start + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "open": 100 + i,
+                "high": 101 + i,
+                "low": 99 + i,
+                "close": 100.5 + i,
+                "volume": 1000,
+            }
+            for i in range(6)
+        ]
+        payload = {
+            "ltp": 999.0,
+            "ltp_timestamp": "2020-01-01 09:15:00 IST",
+            "candles_1m": rows,
+        }
+        d = PsygridClient("http://example.invalid").stock(
+            "TEST", payload, datetime(2026, 9, 16, 9, 20, 5, tzinfo=IST)
+        )
+        self.assertTrue(d.health.healthy, d.health.reason)
+        self.assertEqual(d.ltp, 105.5)
 
     def test_tier3_forces_signal_even_when_gap_breaks_pattern_gates(self):
         cs = valid_long_fixture()
@@ -169,8 +193,6 @@ class StrategyTests(unittest.TestCase):
         cs = late_session_retrace_fixture()
         gate_only_cfg = replace(
             self.cfg,
-            # This test isolates the late-session search behavior; the fixture
-            # deliberately has a larger impulse than production's normal cap.
             max_impulse_atr=5.0,
             max_retracement_volume_ratio=2.0,
             min_persistence=0.40,

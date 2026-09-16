@@ -12,16 +12,12 @@ class StrategyConfig:
     entry_time: str = "09:31"   # legacy field retained for compatibility
     market_close: str = "15:30"
 
-    # Feed integrity
+    # Feed integrity for the canonical PSYGRID 1-minute OHLCV endpoint.
     universe_size: int = 450
     shard_count: int = 10
     shard_size: int = 45
-    # A few seconds of network/publication delay is normal. Only a snapshot
-    # more than four minutes behind the local PC clock is considered stale.
-    max_ltp_age_seconds: float = 240.0
     min_completed_1m: int = 5
     require_full_09_15_to_09_29_grid: bool = False
-    poll_seconds: float = 1.0
     http_timeout_seconds: float = 4.0
     preflight_retry_seconds: float = 2.0
 
@@ -35,8 +31,7 @@ class StrategyConfig:
     min_reclaim_ratio: float = 0.50
 
     # Hard anti-gap / anti-exhaustion rules for Tier 1/2.
-    # Tier 3 scores these conditions as penalties so a healthy feed still
-    # produces a deterministic #1 rather than a strategic NO SIGNAL.
+    # Previous close is optional metadata and is not required by the signal.
     max_gap_pct: float = 3.0
     max_gap_z: float = 3.0
     max_impulse_atr: float = 3.50
@@ -103,5 +98,5 @@ class StrategyConfig:
             raise ValueError("minimum_rr must be >= 1")
         if self.atr_period < 2:
             raise ValueError("atr_period must be >= 2")
-        if self.poll_seconds <= 0:
-            raise ValueError("poll_seconds must be > 0")
+        if self.http_timeout_seconds <= 0:
+            raise ValueError("http_timeout_seconds must be > 0")

@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
-from strategy_930 import Candle, atr, efficiency, evaluate, evaluate_tiers, vwap
+from psygrid_client import PsygridClient
+from strategy_930 import Candle, atr, efficiency, evaluate, evaluate_tiers, session_candles, vwap
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -59,6 +60,12 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(cs[0].ts.time().strftime("%H:%M"), "09:15")
         self.assertEqual(cs[-1].ts.time().strftime("%H:%M"), "09:29")
 
+    def test_preopen_candle_never_becomes_session_candle(self):
+        pre = Candle(datetime(2026, 9, 15, 9, 9, tzinfo=IST), 50, 50, 50, 50, 1)
+        cs = session_candles((pre,) + valid_long_fixture())
+        self.assertEqual(cs[0].ts.time().strftime("%H:%M"), "09:15")
+        self.assertEqual(cs[0].open, 100.0)
+
     def test_strict_impulse_retracement_candidate_exists(self):
         cs = valid_long_fixture()
         candidate = evaluate("TEST", cs, 104.2, 101.0, 1.0, 1.0, [0.0] * 20, self.cfg, 1)
@@ -68,6 +75,45 @@ class StrategyTests(unittest.TestCase):
         self.assertGreaterEqual(candidate.retracement_depth, self.cfg.min_retracement_depth)
         self.assertLessEqual(candidate.retracement_depth, self.cfg.max_retracement_depth)
         self.assertGreaterEqual(candidate.target - candidate.entry, 2 * abs(candidate.entry - candidate.stop))
+
+    def test_missing_previous_close_does_not_change_signal(self):
+        cs = valid_long_fixture()
+        with_close = evaluate("TEST", cs, 104.2, 101.0, 1.0, 1.0, [0.0] * 20, self.cfg, 1)
+        without_close = evaluate("TEST", cs, 104.2, None, 1.0, 1.0, [], self.cfg, 1)
+        self.assertIsNotNone(with_close)
+        self.assertIsNotNone(without_close)
+        self.assertEqual(with_close.side, without_close.side)
+        self.assertAlmostEqual(with_close.score, without_close.score, places=9)
+        self.assertAlmostEqual(with_close.entry, without_close.entry, places=9)
+        self.assertAlmostEqual(with_close.stop, without_close.stop, places=9)
+        self.assertAlmostEqual(with_close.target, without_close.target, places=9)
+
+    def test_psygrid_missing_previous_close_keeps_stock_healthy(self):
+        rows = []
+        start = datetime(2026, 9, 16, 9, 15, tzinfo=IST)
+        for i in range(5):
+            price = 100.0 + i
+            rows.append({
+                "timestamp": (start + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S IST"),
+                "open": price,
+                "high": price + 0.5,
+                "low": price - 0.2,
+                "close": price + 0.3,
+                "volume": 1000,
+            })
+        payload = {
+            "ltp": 105.0,
+            "ltp_timestamp": "2026-09-16 09:20:04 IST",
+            "1m": rows,
+            "5m": [],
+            "15m": [],
+        }
+        d = PsygridClient("http://example.invalid").stock(
+            "TEST", payload, datetime(2026, 9, 16, 9, 20, 5, tzinfo=IST)
+        )
+        self.assertTrue(d.health.healthy, d.health.reason)
+        self.assertIsNone(d.previous_close)
+        self.assertEqual(len(d.candles), 5)
 
     def test_tier3_forces_signal_even_when_gap_breaks_pattern_gates(self):
         cs = valid_long_fixture()

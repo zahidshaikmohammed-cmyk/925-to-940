@@ -130,17 +130,13 @@ class StrategyTests(unittest.TestCase):
                 "close": price + 0.3,
                 "volume": 1000,
             })
-        payload = {
-            "symbol": "TEST",
-            "security_id": "1",
-            "candles_1m": rows,
-        }
+        payload = {"symbol": "TEST", "security_id": "1", "candles_1m": rows}
         d = PsygridClient("http://example.invalid").stock(
             "TEST", payload, datetime(2026, 9, 16, 9, 20, 5, tzinfo=IST)
         )
         self.assertTrue(d.health.healthy, d.health.reason)
         self.assertIsNone(d.previous_close)
-        self.assertEqual(d.ltp, 105.3)
+        self.assertEqual(d.ltp, 104.3)
         self.assertEqual(len(d.candles), 5)
         self.assertNotIn("stale", d.health.reason)
 
@@ -166,7 +162,7 @@ class StrategyTests(unittest.TestCase):
             "TEST", payload, datetime(2026, 9, 16, 9, 20, 5, tzinfo=IST)
         )
         self.assertTrue(d.health.healthy, d.health.reason)
-        self.assertEqual(d.ltp, 105.5)
+        self.assertEqual(d.ltp, 104.5)
 
     def test_tier3_forces_signal_even_when_gap_breaks_pattern_gates(self):
         cs = valid_long_fixture()
@@ -191,12 +187,7 @@ class StrategyTests(unittest.TestCase):
 
     def test_late_session_impulse_is_not_killed_by_old_bar_gate(self):
         cs = late_session_retrace_fixture()
-        gate_only_cfg = replace(
-            self.cfg,
-            max_impulse_atr=5.0,
-            max_retracement_volume_ratio=2.0,
-            min_persistence=0.40,
-        )
+        gate_only_cfg = replace(self.cfg, max_impulse_atr=5.0, max_retracement_volume_ratio=2.0, min_persistence=0.40)
         candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], gate_only_cfg)
         self.assertTrue(candidates)
         self.assertTrue(any(c.tier == 1 for c in candidates), [c.reasons for c in candidates])

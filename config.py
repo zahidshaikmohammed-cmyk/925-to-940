@@ -16,15 +16,16 @@ class StrategyConfig:
     universe_size: int = 450
     shard_count: int = 10
     shard_size: int = 45
-    max_ltp_age_seconds: float = 10.0
-    # Minimum completed candles needed for an intraday snapshot scan.
+    # A few seconds of network/publication delay is normal. Only a snapshot
+    # more than four minutes behind the local PC clock is considered stale.
+    max_ltp_age_seconds: float = 240.0
     min_completed_1m: int = 5
     require_full_09_15_to_09_29_grid: bool = False
     poll_seconds: float = 1.0
     http_timeout_seconds: float = 4.0
     preflight_retry_seconds: float = 2.0
 
-    # Opening-momentum geometry. The scan now evaluates the complete current
+    # Opening-momentum geometry. The scan evaluates the complete current
     # session available at the moment it is run, rather than freezing at 09:30.
     min_impulse_pct: float = 0.35
     min_impulse_bars: int = 3

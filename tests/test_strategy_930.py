@@ -40,6 +40,37 @@ def valid_long_fixture(retrace_volume=400):
     )
 
 
+def late_session_retrace_fixture():
+    start = datetime(2026, 9, 15, 9, 15, tzinfo=IST)
+    rows = []
+    # Quiet opening context.
+    price = 100.0
+    for i in range(20):
+        rows.append((price, price + 0.15, price - 0.10, price + 0.05, 1000))
+        price += 0.05
+    # A later impulse.
+    for i in range(5):
+        o = price
+        c = price + 0.8
+        rows.append((o, c + 0.2, o - 0.1, c, 1800))
+        price = c
+    # Deep retracement, then reclaim.
+    for i in range(5):
+        o = price
+        c = price - 0.5
+        rows.append((o, o + 0.1, c - 0.1, c, 500))
+        price = c
+    for i in range(5):
+        o = price
+        c = price + 0.45
+        rows.append((o, c + 0.1, o - 0.1, c, 900))
+        price = c
+    return tuple(
+        Candle(start + timedelta(minutes=i), o, h, l, c, v)
+        for i, (o, h, l, c, v) in enumerate(rows)
+    )
+
+
 class StrategyTests(unittest.TestCase):
     def setUp(self):
         self.cfg = StrategyConfig()
@@ -122,6 +153,28 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(candidate.tier, 3)
         self.assertIn("FORCED_ENTRY_TIER_3", candidate.reasons)
         self.assertGreater(abs(candidate.entry - candidate.stop), 0)
+
+    def test_tier3_no_retracement_is_not_allowed_high_score(self):
+        start = datetime(2026, 9, 15, 9, 15, tzinfo=IST)
+        cs = tuple(
+            Candle(start + timedelta(minutes=i), 100 + i * 0.25, 100.3 + i * 0.25,
+                   99.9 + i * 0.25, 100.25 + i * 0.25, 1000)
+            for i in range(40)
+        )
+        candidate = evaluate("TREND", cs, cs[-1].close, None, 0.0, 0.0, [], self.cfg, 3)
+        self.assertIsNotNone(candidate)
+        self.assertIn("setup=NO_QUALIFYING_RETRACEMENT", candidate.reasons)
+        self.assertLessEqual(candidate.score, 58.0)
+        self.assertEqual(candidate.retracement_depth, 0.0)
+
+    def test_late_session_impulse_is_not_killed_by_old_bar_gate(self):
+        cs = late_session_retrace_fixture()
+        candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], self.cfg)
+        self.assertTrue(candidates)
+        self.assertTrue(any(c.tier == 1 for c in candidates), [c.reasons for c in candidates])
+        strict = next(c for c in candidates if c.tier == 1)
+        self.assertGreaterEqual(strict.retracement_depth, self.cfg.min_retracement_depth)
+        self.assertLessEqual(strict.retracement_depth, self.cfg.max_retracement_depth)
 
     def test_high_retrace_volume_can_drop_to_fallback(self):
         cs = valid_long_fixture(retrace_volume=1300)

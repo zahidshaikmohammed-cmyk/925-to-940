@@ -171,6 +171,8 @@ class StrategyTests(unittest.TestCase):
             self.cfg,
             max_retracement_volume_ratio=2.0,
             min_persistence=0.40,
+            require_vwap_confirmation=False,
+            maximum_risk_pct=10.0,
         )
         candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], gate_only_cfg)
         self.assertTrue(candidates)

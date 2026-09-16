@@ -141,14 +141,12 @@ def _pivot_start(cs: list[Candle], idx: int, side: int, cfg: StrategyConfig) -> 
 
 
 def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
-    """Find the latest completed impulse followed by a meaningful pullback.
+    """Find a completed impulse followed by a meaningful pullback.
 
-    The original implementation selected the absolute session high/low. That
-    made a late-day scan depend on an early-session extreme and the old
-    ``late_extreme_bar`` gate could eliminate every real setup. This version
-    searches recent extrema and evaluates the latest valid impulse/retracement.
-    The first opening impulse still uses the 09:15 open as its anchor; later
-    impulses use a local pre-impulse pivot.
+    The search is intraday and rolling: later scans are not frozen to the
+    absolute session high/low. The 09:15 open anchors the opening leg; later
+    legs use a local pre-impulse pivot. A genuine deep retracement is preferred
+    over a merely recent shallow pullback.
     """
     n = len(cs)
     if n < cfg.min_impulse_bars + cfg.min_retracement_bars:
@@ -171,9 +169,7 @@ def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
         local_atr = atr(cs[max(0, idx - cfg.atr_period + 1):idx + 1], cfg.atr_period)
         impulse_pct = side * 100.0 * (extreme / start - 1.0)
         impulse_atr = den / max(local_atr, 1e-12)
-        if impulse_pct < cfg.min_impulse_pct:
-            continue
-        if impulse_atr > cfg.max_impulse_atr:
+        if impulse_pct < cfg.min_impulse_pct or impulse_atr > cfg.max_impulse_atr:
             continue
 
         post = cs[idx + 1:]
@@ -189,19 +185,19 @@ def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
         else:
             reclaim = (retrace - cs[-1].close) / max(retrace - extreme, 1e-12)
 
-        candidates.append((
-            idx, extreme, retrace, depth, reclaim,
-            impulse_pct, impulse_atr, start,
-        ))
+        candidates.append((idx, extreme, retrace, depth, reclaim, impulse_pct, impulse_atr, start))
 
     if not candidates:
         return None
 
-    # Prefer the most recent completed setup. Quality then breaks ties.
     return sorted(
         candidates,
-        key=lambda x: (x[0], -abs(x[3] - 0.52), x[6]),
-        reverse=True,
+        key=lambda x: (
+            0 if cfg.min_retracement_depth <= x[3] <= cfg.max_retracement_depth else 1,
+            abs(x[3] - 0.52),
+            -x[0],
+            -x[6],
+        ),
     )[0]
 
 
@@ -233,11 +229,7 @@ def _emergency_candidate(
     sector_return: float,
     cfg: StrategyConfig,
 ) -> Candidate | None:
-    """Tier 3: always rank a healthy stock, but never pretend it has a setup.
-
-    Tier 3 exists to satisfy the user's deterministic one-#1 requirement. It
-    is explicitly lower quality when no real impulse/retracement exists.
-    """
+    """Tier 3: always rank a healthy stock, but never pretend it has a setup."""
     a = atr(cs, cfg.atr_period)
     if a <= 0 or entry <= 0 or len(cs) < cfg.min_completed_1m:
         return None
@@ -256,7 +248,6 @@ def _emergency_candidate(
         idx, extreme, retrace, depth, reclaim, impulse_pct, impulse_atr, leg_start = leg
         setup_label = "RECENT_IMPULSE_RETRACEMENT_WEAK"
         retracement_score = clamp(1.0 - abs(depth - 0.52) / 0.52)
-        setup_momentum = scale(impulse_atr, 0.5, 2.5)
         retracement_level = retrace
     else:
         idx = -1
@@ -266,15 +257,12 @@ def _emergency_candidate(
         impulse_pct = side * stock_ret
         setup_label = "NO_QUALIFYING_RETRACEMENT"
         retracement_score = 0.0
-        setup_momentum = 0.0
         retracement_level = last
 
     recent = cs[-12:]
     recent_move = side * (recent[-1].close - recent[0].open) / a
     recent_eff = efficiency(recent)
-    persistence = sum(
-        1 for c in recent[1:] if side * (c.close - c.open) > 0
-    ) / max(len(recent) - 1, 1)
+    persistence = sum(1 for c in recent[1:] if side * (c.close - c.open) > 0) / max(len(recent) - 1, 1)
 
     momentum_score = scale(recent_move, 0.25, 2.5)
     rs_score = scale(rs, -0.50, 2.00)
@@ -282,8 +270,6 @@ def _emergency_candidate(
     vwap_score = scale(vw_dist, -0.50, 1.50)
     structure_score = 0.55 * clamp(recent_eff) + 0.45 * persistence
 
-    # Extension is deliberately nonlinear: a 3-4 ATR chase cannot receive a
-    # high score merely because relative strength is strong.
     extension_penalty = (
         22.0 * scale(abs(recent_move), 2.0, 3.5)
         + 18.0 * scale(abs(vw_dist), 1.75, 3.0)
@@ -386,15 +372,12 @@ def _build_candidate(
     eff = efficiency(impulse_bars)
     vw_dist = side * (cs[-1].close - vw) / a
     extension = abs(cs[-1].close - vw) / a
-    persistence = sum(
-        1 for c in cs[1:] if side * (c.close - c.open) > 0
-    ) / max(len(cs) - 1, 1)
+    persistence = sum(1 for c in cs[1:] if side * (c.close - c.open) > 0) / max(len(cs) - 1, 1)
 
     _ = gap
     _ = gap_z
     if impulse_pct < cfg.min_impulse_pct:
         return None
-    # max_impulse_atr is enforced inside _leg; there is no obsolete late-bar gate.
 
     if tier == 1:
         if not cfg.min_retracement_depth <= depth <= cfg.max_retracement_depth:

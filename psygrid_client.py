@@ -14,6 +14,7 @@ IST = ZoneInfo("Asia/Kolkata")
 SHARDS = tuple(f"live-{x}.json" for x in "abcdefghij")
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
+MAX_CANDLE_FRESHNESS_SECONDS = 90.0
 
 
 @dataclass(frozen=True)
@@ -175,9 +176,12 @@ class PsygridClient:
         """Build a live snapshot containing completed 1m candles today.
 
         Previous close is optional metadata. It is never a feed-health gate.
-        The 925-to-940 signal is based on today's intraday OHLCV and live LTP.
+        If the feed does not publish an LTP timestamp, the newest completed
+        1-minute candle is used as a bounded freshness proxy instead of
+        rejecting an otherwise usable live stock snapshot.
         """
         now = now or datetime.now(IST)
+        now_ist = now.astimezone(IST)
         reasons: list[str] = []
         all_candles = self.candles(payload.get("1m", []))
 
@@ -190,10 +194,22 @@ class PsygridClient:
 
         ltp_timestamp = payload.get("ltp_timestamp")
         if not ltp_timestamp:
-            reasons.append("missing_ltp_timestamp")
+            # Some public snapshots omit ltp_timestamp even though the
+            # WebSocket-built 1m stream is current. Do not fabricate a time;
+            # use the latest completed candle timestamp as the freshness
+            # boundary, with a deliberately conservative 90-second limit.
+            latest = all_candles[-1].ts if all_candles else None
+            if latest is None:
+                reasons.append("missing_ltp_timestamp_and_no_completed_candle")
+            else:
+                candle_age = (now_ist - latest).total_seconds()
+                if candle_age < -5:
+                    reasons.append(f"future_latest_candle_{candle_age:.1f}s")
+                elif candle_age > MAX_CANDLE_FRESHNESS_SECONDS:
+                    reasons.append(f"stale_completed_candle_{candle_age:.1f}s")
         else:
             try:
-                age = (now - self._ts(ltp_timestamp)).total_seconds()
+                age = (now_ist - self._ts(ltp_timestamp)).total_seconds()
                 if age < -5:
                     reasons.append(f"future_ltp_timestamp_{age:.1f}s")
                 elif age > 10:
@@ -203,9 +219,9 @@ class PsygridClient:
 
         session = tuple(
             c for c in all_candles
-            if c.ts.astimezone(IST).date() == now.astimezone(IST).date()
+            if c.ts.astimezone(IST).date() == now_ist.date()
             and SESSION_START <= c.ts.astimezone(IST).time() < MARKET_CLOSE
-            and c.ts <= now.replace(second=59, microsecond=999999)
+            and c.ts < now_ist.replace(second=0, microsecond=0)
         )
         if len(session) < 5:
             reasons.append(f"insufficient_completed_1m_{len(session)}")

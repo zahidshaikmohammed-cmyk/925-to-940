@@ -8,8 +8,8 @@ class StrategyConfig:
     # Exchange/session clock
     timezone: str = "Asia/Kolkata"
     session_start: str = "09:15"
-    signal_time: str = "09:30"
-    entry_time: str = "09:31"
+    signal_time: str = "09:30"  # legacy field retained for compatibility
+    entry_time: str = "09:31"   # legacy field retained for compatibility
     market_close: str = "15:30"
 
     # Feed integrity
@@ -17,13 +17,15 @@ class StrategyConfig:
     shard_count: int = 10
     shard_size: int = 45
     max_ltp_age_seconds: float = 10.0
-    min_completed_1m: int = 15
-    require_full_09_15_to_09_29_grid: bool = True
+    # Minimum completed candles needed for an intraday snapshot scan.
+    min_completed_1m: int = 5
+    require_full_09_15_to_09_29_grid: bool = False
     poll_seconds: float = 1.0
     http_timeout_seconds: float = 4.0
     preflight_retry_seconds: float = 2.0
 
-    # Strict pattern: impulse -> deep retracement -> reclaim
+    # Opening-momentum geometry. The scan now evaluates the complete current
+    # session available at the moment it is run, rather than freezing at 09:30.
     min_impulse_pct: float = 0.35
     min_impulse_bars: int = 3
     min_retracement_bars: int = 3
@@ -31,7 +33,9 @@ class StrategyConfig:
     max_retracement_depth: float = 0.70
     min_reclaim_ratio: float = 0.50
 
-    # Hard anti-gap / anti-exhaustion rules. These survive fallback tiers.
+    # Hard anti-gap / anti-exhaustion rules for Tier 1/2.
+    # Tier 3 scores these conditions as penalties so a healthy feed still
+    # produces a deterministic #1 rather than a strategic NO SIGNAL.
     max_gap_pct: float = 3.0
     max_gap_z: float = 3.0
     max_impulse_atr: float = 3.50
@@ -63,7 +67,7 @@ class StrategyConfig:
     minimum_risk_pct: float = 0.15
     maximum_risk_pct: float = 3.0
 
-    # Emergency fallback thresholds. Hard anti-gap/exhaustion rules remain.
+    # Tier 2 relaxation
     fallback_retrace_min: float = 0.30
     fallback_retrace_max: float = 0.75
     fallback_reclaim_min: float = 0.35
@@ -88,6 +92,8 @@ class StrategyConfig:
             raise ValueError(f"ranking weights must sum to 1.0, got {sum(weights):.12f}")
         if self.universe_size != self.shard_count * self.shard_size:
             raise ValueError("universe_size must equal shard_count * shard_size")
+        if self.min_completed_1m < 5:
+            raise ValueError("min_completed_1m must be >= 5")
         if self.min_retracement_depth >= self.max_retracement_depth:
             raise ValueError("invalid strict retracement interval")
         if self.fallback_retrace_min >= self.fallback_retrace_max:

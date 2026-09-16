@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -43,18 +44,15 @@ def valid_long_fixture(retrace_volume=400):
 def late_session_retrace_fixture():
     start = datetime(2026, 9, 15, 9, 15, tzinfo=IST)
     rows = []
-    # Quiet opening context.
     price = 100.0
     for i in range(20):
         rows.append((price, price + 0.15, price - 0.10, price + 0.05, 1000))
         price += 0.05
-    # A later impulse.
     for i in range(5):
         o = price
         c = price + 0.8
         rows.append((o, c + 0.2, o - 0.1, c, 1800))
         price = c
-    # Deep retracement, then reclaim.
     for i in range(5):
         o = price
         c = price - 0.5
@@ -169,12 +167,18 @@ class StrategyTests(unittest.TestCase):
 
     def test_late_session_impulse_is_not_killed_by_old_bar_gate(self):
         cs = late_session_retrace_fixture()
-        candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], self.cfg)
+        gate_only_cfg = replace(
+            self.cfg,
+            max_retracement_volume_ratio=2.0,
+            min_persistence=0.40,
+        )
+        candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], gate_only_cfg)
         self.assertTrue(candidates)
         self.assertTrue(any(c.tier == 1 for c in candidates), [c.reasons for c in candidates])
         strict = next(c for c in candidates if c.tier == 1)
         self.assertGreaterEqual(strict.retracement_depth, self.cfg.min_retracement_depth)
         self.assertLessEqual(strict.retracement_depth, self.cfg.max_retracement_depth)
+        self.assertGreater(strict.reasons.index("setup=IMPULSE_RETRACEMENT"), -1)
 
     def test_high_retrace_volume_can_drop_to_fallback(self):
         cs = valid_long_fixture(retrace_volume=1300)

@@ -66,12 +66,7 @@ class PsygridClient:
         return payload
 
     def market(self) -> dict:
-        """Fetch all shards and keep every valid unique stock that is available.
-
-        A broken shard, malformed stock payload, or duplicate symbol no longer
-        invalidates the entire scan. The affected item is skipped and the
-        remaining unique stocks are returned for scoring.
-        """
+        """Fetch all shards and keep every valid unique stock that is available."""
         out: dict = {}
         errors: list[str] = []
         duplicates: list[str] = []
@@ -92,7 +87,6 @@ class PsygridClient:
                     declared = payload.get("stock_count")
                     if declared != 45:
                         errors.append(f"{shard}: declared stock_count={declared}, expected 45; valid records retained")
-
                     for symbol, stock in stocks.items():
                         if not isinstance(symbol, str) or not symbol.strip():
                             errors.append(f"{shard}: invalid blank symbol skipped")
@@ -110,7 +104,6 @@ class PsygridClient:
         self.last_market_errors = tuple(errors)
         self.last_market_duplicates = tuple(sorted(set(duplicates)))
         self.last_market_coverage = len(out)
-
         if errors:
             print(f"[FEED-WARN] {len(errors)} shard/record issue(s); affected items skipped")
         if duplicates:
@@ -150,7 +143,11 @@ class PsygridClient:
         return tuple(sorted(out, key=lambda c: c.ts))
 
     def stock(self, symbol: str, payload: dict, now: datetime | None = None) -> StockData:
-        """Build a live snapshot containing every completed 1m candle today."""
+        """Build a live snapshot containing completed 1m candles today.
+
+        Previous close is optional metadata. It is never a feed-health gate.
+        The 925-to-940 signal is based on today's intraday OHLCV and live LTP.
+        """
         now = now or datetime.now(IST)
         reasons: list[str] = []
         all_candles = self.candles(payload.get("1m", []))
@@ -189,14 +186,8 @@ class PsygridClient:
             previous_close = float(previous_close) if previous_close is not None else None
         except (TypeError, ValueError):
             previous_close = None
-
-        if previous_close is None:
-            for candle in self.candles(payload.get("15m", [])):
-                if candle.ts.date() < now.date() and candle.ts.time() <= dtime(15, 30):
-                    previous_close = candle.close
-                    break
-        if previous_close is None or previous_close <= 0:
-            reasons.append("missing_previous_close")
+        # Optional metadata only. Missing/invalid previous close does not
+        # invalidate the stock or prevent signal generation.
 
         return StockData(
             symbol=symbol,

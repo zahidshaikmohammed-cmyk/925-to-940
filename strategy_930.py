@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as dtime
 from math import isfinite
 from statistics import median
 from typing import Iterable
@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 from config import StrategyConfig
 
 IST = ZoneInfo("Asia/Kolkata")
+SESSION_START = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,23 @@ def finite_ohlcv(c: Candle) -> bool:
     )
 
 
+def session_candles(candles: Iterable[Candle]) -> list[Candle]:
+    """Return only today's regular-session candles.
+
+    The 09:15 candle is the preferred opening reference. Pre-open rows such as
+    09:09 are never allowed to become the opening reference by accident.
+    """
+    cs = sorted(list(candles), key=lambda c: c.ts)
+    if not cs:
+        return []
+    today = cs[-1].ts.astimezone(IST).date()
+    return [
+        c for c in cs
+        if c.ts.astimezone(IST).date() == today
+        and SESSION_START <= c.ts.astimezone(IST).time() < MARKET_CLOSE
+    ]
+
+
 def atr(cs: list[Candle] | tuple[Candle, ...], period: int) -> float:
     prev = None
     trs: list[float] = []
@@ -105,8 +124,15 @@ def robust_z(x: float, sample: Iterable[float]) -> float:
     return 0.0 if mad == 0 else 0.6744897501960817 * (x - m) / mad
 
 
+def _opening_price(cs: list[Candle]) -> float:
+    for c in cs:
+        if c.ts.astimezone(IST).time() == SESSION_START:
+            return c.open
+    return cs[0].open
+
+
 def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
-    start = cs[0].open
+    start = _opening_price(cs)
     idx = (max if side == 1 else min)(
         range(len(cs)), key=lambda i: cs[i].high if side == 1 else cs[i].low
     )
@@ -128,7 +154,7 @@ def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
     else:
         reclaim = (retrace - cs[-1].close) / max(retrace - extreme, 1e-12)
     impulse_pct = side * 100.0 * (extreme / start - 1.0)
-    return idx, extreme, retrace, depth, reclaim, impulse_pct
+    return idx, extreme, retrace, depth, reclaim, impulse_pct, start
 
 
 def _hard_exhaustion(
@@ -151,41 +177,39 @@ def _hard_exhaustion(
     return False
 
 
+def _gap_pct(start: float, previous_close: float | None) -> float:
+    if previous_close is None or previous_close <= 0:
+        return 0.0
+    return 100.0 * (start / previous_close - 1.0)
+
+
 def _emergency_candidate(
     symbol: str,
     side: int,
     name: str,
     cs: list[Candle],
     entry: float,
-    previous_close: float,
+    previous_close: float | None,
     market_return: float,
     sector_return: float,
     cfg: StrategyConfig,
 ) -> Candidate | None:
-    """Tier 3: deterministic candidate from a healthy live snapshot.
-
-    Tier 1/2 are pattern-gated. Tier 3 is deliberately not a NO-SIGNAL gate:
-    when the 450-stock feed is healthy, every stock still contributes a
-    directional LONG/SHORT hypothesis and the global scanner can select #1.
-    Extreme conditions reduce the score rather than creating a fake missing
-    candidate. Data-integrity failures remain fatal and are never fabricated.
-    """
     a = atr(cs, cfg.atr_period)
-    if a <= 0 or entry <= 0 or previous_close <= 0 or len(cs) < cfg.min_completed_1m:
+    if a <= 0 or entry <= 0 or len(cs) < cfg.min_completed_1m:
         return None
 
-    start = cs[0].open
+    start = _opening_price(cs)
     last = cs[-1].close
     vw = vwap(cs)
     stock_ret = 100.0 * (last / start - 1.0)
-    gap = 100.0 * (start / previous_close - 1.0)
+    gap = _gap_pct(start, previous_close)
     rs = side * (stock_ret - market_return)
     srs = side * (stock_ret - sector_return)
     impulse = side * stock_ret
     move_atr = abs(last - start) / a
     vw_dist = side * (last - vw) / a
     eff = efficiency(cs)
-    recent_move = side * (last - cs[-4].close) / a
+    recent_move = side * (last - cs[-4].close) / a if len(cs) >= 4 else side * (last - cs[0].close) / a
     directional_score = clamp(
         0.5
         + 0.20 * impulse / max(1.0, abs(impulse))
@@ -209,8 +233,6 @@ def _emergency_candidate(
     target = entry + side * target_distance
 
     penalty = 0.0
-    if abs(gap) > cfg.max_gap_pct:
-        penalty += 12.0
     if move_atr > cfg.max_impulse_atr:
         penalty += 10.0
     if abs(vw_dist) > cfg.max_extension_from_vwap_atr:
@@ -220,34 +242,22 @@ def _emergency_candidate(
     reasons = (
         "FORCED_ENTRY_TIER_3",
         "PATTERN_GATES_BYPASSED_AFTER_TIER_1_2_FAILURE",
+        "PREVIOUS_CLOSE_NOT_REQUIRED_FOR_SIGNAL",
         f"session_candles={len(cs)}",
         f"directional_score={directional_score:.3f}",
-        f"gap={gap:+.3f}%",
+        f"gap={'NA' if previous_close is None else f'{gap:+.3f}%'}",
         f"move_atr={move_atr:.3f}",
         f"rs_market={rs:+.3f}%",
         f"rs_sector={srs:+.3f}%",
         f"vw_dist_atr={vw_dist:+.3f}",
     )
     return Candidate(
-        symbol=symbol,
-        side=name,
-        score=score,
-        entry=entry,
-        stop=stop,
-        target=target,
-        gap_pct=gap,
-        impulse_pct=impulse,
-        impulse_atr=move_atr,
-        retracement_depth=0.0,
-        retracement_volume_ratio=1.0,
-        rs_market=rs,
-        rs_sector=srs,
-        vwap_distance_atr=vw_dist,
-        structure=structure_score,
-        atr_value=a,
-        retracement_level=last,
-        tier=3,
-        reasons=reasons,
+        symbol=symbol, side=name, score=score, entry=entry, stop=stop, target=target,
+        gap_pct=gap, impulse_pct=impulse, impulse_atr=move_atr,
+        retracement_depth=0.0, retracement_volume_ratio=1.0,
+        rs_market=rs, rs_sector=srs, vwap_distance_atr=vw_dist,
+        structure=structure_score, atr_value=a, retracement_level=last,
+        tier=3, reasons=reasons,
     )
 
 
@@ -257,7 +267,7 @@ def _build_candidate(
     name: str,
     cs: list[Candle],
     entry: float,
-    previous_close: float,
+    previous_close: float | None,
     market_return: float,
     sector_return: float,
     gap_z: float,
@@ -265,23 +275,21 @@ def _build_candidate(
     tier: int,
 ):
     if tier == 3:
-        return _emergency_candidate(
-            symbol, side, name, cs, entry, previous_close,
-            market_return, sector_return, cfg,
-        )
+        return _emergency_candidate(symbol, side, name, cs, entry, previous_close, market_return, sector_return, cfg)
 
     a = atr(cs, cfg.atr_period)
     if a <= 0:
         return None
-    stock_ret = 100.0 * (cs[-1].close / cs[0].open - 1.0)
-    gap = 100.0 * (cs[0].open / previous_close - 1.0)
+    start = _opening_price(cs)
+    stock_ret = 100.0 * (cs[-1].close / start - 1.0)
+    gap = _gap_pct(start, previous_close)
     vw = vwap(cs)
     leg = _leg(cs, side, cfg)
     if not leg:
         return None
 
-    idx, extreme, retrace, depth, reclaim, impulse_pct = leg
-    impulse_atr = abs(extreme - cs[0].open) / a
+    idx, extreme, retrace, depth, reclaim, impulse_pct, opening_price = leg
+    impulse_atr = abs(extreme - opening_price) / a
     rs = side * (stock_ret - market_return)
     srs = side * (stock_ret - sector_return)
     impulse_bars = cs[: idx + 1]
@@ -294,8 +302,10 @@ def _build_candidate(
     extension = abs(cs[-1].close - vw) / a
     persistence = sum(1 for c in cs[1:] if side * (c.close - c.open) > 0) / max(len(cs) - 1, 1)
 
-    if abs(gap) > cfg.max_gap_pct or abs(gap_z) > cfg.max_gap_z:
-        return None
+    # Previous close/gap is deliberately informational only. It can never
+    # reject or penalize a signal because the live Psygrid schema may omit it.
+    _ = gap
+    _ = gap_z
     if impulse_pct < cfg.min_impulse_pct:
         return None
     if _hard_exhaustion(idx, impulse_atr, a, cs[-1].close, extreme, vw_dist, cfg):
@@ -363,6 +373,7 @@ def _build_candidate(
     target = entry + side * target_distance
     reasons = (
         "STRICT" if tier == 1 else f"FALLBACK_TIER_{tier}",
+        "PREVIOUS_CLOSE_NOT_REQUIRED_FOR_SIGNAL",
         f"session_candles={len(cs)}",
         f"depth={depth:.3f}",
         f"reclaim={reclaim:.3f}",
@@ -372,25 +383,12 @@ def _build_candidate(
         f"vw_dist_atr={vw_dist:.3f}",
     )
     return Candidate(
-        symbol=symbol,
-        side=name,
-        score=score,
-        entry=entry,
-        stop=stop,
-        target=target,
-        gap_pct=gap,
-        impulse_pct=impulse_pct,
-        impulse_atr=impulse_atr,
-        retracement_depth=depth,
-        retracement_volume_ratio=vol_ratio,
-        rs_market=rs,
-        rs_sector=srs,
-        vwap_distance_atr=vw_dist,
-        structure=st,
-        atr_value=a,
-        retracement_level=retrace,
-        tier=tier,
-        reasons=reasons,
+        symbol=symbol, side=name, score=score, entry=entry, stop=stop, target=target,
+        gap_pct=gap, impulse_pct=impulse_pct, impulse_atr=impulse_atr,
+        retracement_depth=depth, retracement_volume_ratio=vol_ratio,
+        rs_market=rs, rs_sector=srs, vwap_distance_atr=vw_dist,
+        structure=st, atr_value=a, retracement_level=retrace,
+        tier=tier, reasons=reasons,
     )
 
 
@@ -398,32 +396,31 @@ def evaluate(
     symbol: str,
     candles: Iterable[Candle],
     entry: float,
-    previous_close: float,
+    previous_close: float | None,
     market_return: float,
     sector_return: float,
     gap_history: Iterable[float],
     cfg: StrategyConfig,
     tier: int = 1,
 ):
-    # Evaluate every completed session candle supplied by the live feed.
-    # There is no 09:30 cutoff and no artificial 15-candle cap anymore.
-    cs = sorted(list(candles), key=lambda c: c.ts)
+    cs = session_candles(candles)
     if len(cs) < cfg.min_completed_1m or any(not finite_ohlcv(c) for c in cs):
         return None
-    if previous_close <= 0 or entry <= 0:
+    if entry <= 0:
         return None
+
     if tier == 3:
         longs = _emergency_candidate(symbol, 1, "LONG", cs, entry, previous_close, market_return, sector_return, cfg)
         shorts = _emergency_candidate(symbol, -1, "SHORT", cs, entry, previous_close, market_return, sector_return, cfg)
         return max((c for c in (longs, shorts) if c is not None), key=lambda c: (c.score, c.side == "LONG"), default=None)
 
-    gap = 100.0 * (cs[0].open / previous_close - 1.0)
-    gap_z = robust_z(gap, gap_history)
+    # gap_history is retained only for API compatibility with earlier builds.
+    _ = gap_history
     best = None
     for side, name in ((1, "LONG"), (-1, "SHORT")):
         candidate = _build_candidate(
             symbol, side, name, cs, entry, previous_close,
-            market_return, sector_return, gap_z, cfg, tier,
+            market_return, sector_return, 0.0, cfg, tier,
         )
         if candidate is not None and (best is None or candidate.score > best.score):
             best = candidate
@@ -434,7 +431,7 @@ def evaluate_tiers(
     symbol: str,
     candles: Iterable[Candle],
     entry: float,
-    previous_close: float,
+    previous_close: float | None,
     market_return: float,
     sector_return: float,
     gap_history: Iterable[float],

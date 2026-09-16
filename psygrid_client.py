@@ -65,6 +65,35 @@ class PsygridClient:
             raise RuntimeError(f"live-a.json expected 45 stocks, got {payload.get('stock_count')}")
         return payload
 
+    def preflight_all(self) -> dict[str, dict]:
+        """Check every public shard independently without making partial data fatal."""
+        results: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
+            futures = {executor.submit(self._get, f"public/{shard}"): shard for shard in SHARDS}
+            for future in as_completed(futures):
+                shard = futures[future]
+                try:
+                    payload = future.result()
+                    if not isinstance(payload, dict):
+                        results[shard] = {"ok": False, "count": 0, "error": "payload is not an object"}
+                        continue
+                    stocks = payload.get("stocks")
+                    if not isinstance(stocks, dict):
+                        results[shard] = {"ok": False, "count": 0, "error": "missing/invalid stocks object"}
+                        continue
+                    count = len(stocks)
+                    declared = payload.get("stock_count")
+                    ok = count == 45 and declared == 45
+                    results[shard] = {
+                        "ok": ok,
+                        "count": count,
+                        "declared": declared,
+                        "error": None if ok else f"declared={declared}, records={count}, expected=45",
+                    }
+                except Exception as exc:
+                    results[shard] = {"ok": False, "count": 0, "error": str(exc)}
+        return {shard: results.get(shard, {"ok": False, "count": 0, "error": "no result"}) for shard in SHARDS}
+
     def market(self) -> dict:
         """Fetch all shards and keep every valid unique stock that is available."""
         out: dict = {}
@@ -174,8 +203,8 @@ class PsygridClient:
 
         session = tuple(
             c for c in all_candles
-            if c.ts.date() == now.date()
-            and SESSION_START <= c.ts.time() < MARKET_CLOSE
+            if c.ts.astimezone(IST).date() == now.astimezone(IST).date()
+            and SESSION_START <= c.ts.astimezone(IST).time() < MARKET_CLOSE
             and c.ts <= now.replace(second=59, microsecond=999999)
         )
         if len(session) < 5:

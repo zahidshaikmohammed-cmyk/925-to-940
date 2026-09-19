@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
-from psygrid_client import PsygridClient
+from psygrid_client import ENDPOINT_PATH, EXPECTED_UNIVERSE, PsygridClient
 from strategy_930 import Candle, atr, efficiency, evaluate, evaluate_tiers, session_candles, vwap
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -139,6 +139,45 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(d.ltp, 104.3)
         self.assertEqual(len(d.candles), 5)
         self.assertNotIn("stale", d.health.reason)
+
+    def test_990_endpoint_constants_are_canonical(self):
+        self.assertEqual(ENDPOINT_PATH, "public/live-j.json")
+        self.assertEqual(EXPECTED_UNIVERSE, 990)
+
+    def test_single_990_endpoint_snapshot_retains_partial_valid_universe(self):
+        client = PsygridClient("http://example.invalid")
+        rows = [{
+            "timestamp": "2026-09-16 09:15:00 IST",
+            "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.2, "volume": 1000,
+        }, {
+            "timestamp": "2026-09-16 09:16:00 IST",
+            "open": 100.2, "high": 100.7, "low": 100.0, "close": 100.4, "volume": 1000,
+        }, {
+            "timestamp": "2026-09-16 09:17:00 IST",
+            "open": 100.4, "high": 100.9, "low": 100.2, "close": 100.6, "volume": 1000,
+        }, {
+            "timestamp": "2026-09-16 09:18:00 IST",
+            "open": 100.6, "high": 101.1, "low": 100.4, "close": 100.8, "volume": 1000,
+        }, {
+            "timestamp": "2026-09-16 09:19:00 IST",
+            "open": 100.8, "high": 101.3, "low": 100.6, "close": 101.0, "volume": 1000,
+        }, {
+            "timestamp": "2026-09-16 09:20:00 IST",
+            "open": 101.0, "high": 101.5, "low": 100.8, "close": 101.2, "volume": 1000,
+        }]
+        payload = {
+            "universe_size": 990,
+            "stock_count": 1,
+            "status": "OPEN",
+            "stocks": {"TEST": {"symbol": "TEST", "security_id": "1", "candles_1m": rows}},
+        }
+        client._get = lambda path: payload
+        result = client.market()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result["TEST"]["candles_1m"][-1]["close"], 101.2)
+        self.assertEqual(client.last_market_coverage, 1)
+        self.assertIn("actual records=1", client.last_market_errors[0])
+        self.assertEqual(client.last_market_meta["endpoint"], ENDPOINT_PATH)
 
     def test_old_ltp_timestamp_is_ignored_when_endpoint_has_1m_ohlcv(self):
         start = datetime(2026, 9, 16, 9, 15, tzinfo=IST)

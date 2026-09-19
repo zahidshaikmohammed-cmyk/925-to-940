@@ -167,7 +167,7 @@ class StrategyTests(unittest.TestCase):
         }]
         payload = {
             "universe_size": 990,
-            "stock_count": 1,
+            "stock_count": 2,
             "status": "OPEN",
             "stocks": {"TEST": {"symbol": "TEST", "security_id": "1", "candles_1m": rows}},
         }
@@ -176,7 +176,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result["TEST"]["candles_1m"][-1]["close"], 101.2)
         self.assertEqual(client.last_market_coverage, 1)
-        self.assertIn("actual records=1", client.last_market_errors[0])
+        self.assertTrue(any("actual records=1" in item for item in client.last_market_errors))
         self.assertEqual(client.last_market_meta["endpoint"], ENDPOINT_PATH)
 
     def test_old_ltp_timestamp_is_ignored_when_endpoint_has_1m_ohlcv(self):

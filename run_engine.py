@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, time as dtime
 from pathlib import Path
@@ -11,7 +10,7 @@ from statistics import median
 from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
-from psygrid_client import PsygridClient, SHARDS, StockData
+from psygrid_client import ENDPOINT_PATH, EXPECTED_UNIVERSE, PsygridClient, StockData
 from strategy_930 import Candidate, evaluate_tiers
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -63,11 +62,11 @@ def is_trading_day(day) -> bool:
 
 def print_banner() -> None:
     print("=" * 96)
-    print("PSYGRID // 450-STOCK INTRADAY #1 DETERMINISTIC SCANNER")
+    print("PSYGRID // 990-STOCK INTRADAY #1 DETERMINISTIC SCANNER")
     print("=" * 96)
     print("Run at ANY market time | scans every AVAILABLE stock | LONG + SHORT | returns one #1")
-    print("Target universe: 450 | failed/duplicate stocks are skipped | remaining healthy stocks are scored")
-    print("Completed 1m candles available at runtime | live LTP | Tier 1 -> Tier 2 -> Tier 3")
+    print("Target universe: 990 | failed stocks are skipped | remaining healthy stocks are scored")
+    print("Completed 1m candles available at runtime | latest completed 1m close | Tier 1 -> Tier 2 -> Tier 3")
     print("Previous close is OPTIONAL metadata and never blocks signal generation")
     print("Rolling impulse/retracement geometry + rolling relative strength are used for rescans")
     print("Tier 3 prevents strategic NO SIGNAL; feed integrity is enforced per stock, not globally")
@@ -162,50 +161,23 @@ def select_global_best(candidates: list[Candidate]) -> Candidate | None:
 
 
 def preflight(client: PsygridClient) -> tuple[bool, dict[str, dict]]:
-    """Probe all ten public shards and report each result independently."""
-    results: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
-        futures = {executor.submit(client._get, f"public/{shard}"): shard for shard in SHARDS}
-        for future in as_completed(futures):
-            shard = futures[future]
-            try:
-                payload = future.result()
-                if not isinstance(payload, dict):
-                    results[shard] = {"ok": False, "count": 0, "error": "payload is not an object"}
-                    continue
-                stocks = payload.get("stocks")
-                if not isinstance(stocks, dict):
-                    results[shard] = {"ok": False, "count": 0, "error": "missing/invalid stocks object"}
-                    continue
-                count = len(stocks)
-                declared = payload.get("stock_count")
-                ok = count == 45 and declared == 45
-                results[shard] = {
-                    "ok": ok,
-                    "count": count,
-                    "declared": declared,
-                    "error": None if ok else f"declared={declared}, records={count}, expected=45",
-                }
-            except Exception as exc:
-                results[shard] = {"ok": False, "count": 0, "error": str(exc)}
-    ordered = {shard: results.get(shard, {"ok": False, "count": 0, "error": "no result"}) for shard in SHARDS}
-    return all(item["ok"] for item in ordered.values()), ordered
+    """Validate the single atomic 990-stock public endpoint."""
+    results = client.preflight_all()
+    return all(item.get("ok", False) for item in results.values()), results
 
 
 def print_preflight(results: dict[str, dict]) -> None:
-    print("PREFLIGHT — ALL PUBLIC SHARDS:")
-    ok_count = 0
-    record_count = 0
-    for shard, result in results.items():
-        label = shard.replace("live-", "").replace(".json", "").upper()
-        record_count += int(result.get("count", 0))
-        if result.get("ok"):
-            ok_count += 1
-            print(f"  SHARD {label}: OK {result.get('count')}/45")
-        else:
-            print(f"  SHARD {label}: FAILED — {result.get('error')}")
-    print(f"  SHARDS: {ok_count}/{len(results)} healthy")
-    print(f"  RAW RECORDS: {record_count}")
+    print("PREFLIGHT — ATOMIC 990-STOCK ENDPOINT:")
+    for endpoint, result in results.items():
+        print(
+            f"  {endpoint}: "
+            f"{'OK' if result.get('ok') else 'FAILED'} | "
+            f"records={result.get('count', 0)} | "
+            f"declared={result.get('declared')} | "
+            f"universe={result.get('universe_size', EXPECTED_UNIVERSE)}"
+        )
+        if result.get("error"):
+            print(f"  ERROR: {result.get('error')}")
 
 
 def health_failure_report(parsed: dict[str, StockData]) -> tuple[Counter, dict[str, list[str]]]:
@@ -230,9 +202,9 @@ def run_self_test() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="PSYGRID any-time 450-stock scanner")
+    parser = argparse.ArgumentParser(description="PSYGRID any-time 990-stock scanner")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
-    parser.add_argument("--preflight-only", action="store_true", help="inspect all ten public shards and exit")
+    parser.add_argument("--preflight-only", action="store_true", help="inspect the atomic 990-stock public endpoint and exit")
     parser.add_argument("--base-url", default=BASE_URL)
     args = parser.parse_args(argv)
 
@@ -279,11 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
 
     print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S.%f} IST")
-    print(f"UNIVERSE     : {len(parsed)}/450 unique stocks received")
+    print(f"UNIVERSE     : {len(parsed)}/{EXPECTED_UNIVERSE} unique stocks received")
     print(f"HEALTHY      : {len(healthy)}")
     print(f"SKIPPED      : {len(unhealthy)} stock(s) failed per-stock feed checks")
     print(f"SHARD ISSUES : {len(client.last_market_errors)}")
     print(f"DUPLICATES   : {len(client.last_market_duplicates)}")
+    meta = client.last_market_meta
+    if meta:
+        session_meta = meta.get("session", {}) if isinstance(meta.get("session"), dict) else {}
+        print(f"FEED ENDPOINT: {meta.get('endpoint', ENDPOINT_PATH)}")
+        print(f"FEED STATUS  : {meta.get('status', 'UNKNOWN')}")
+        if session_meta.get("current_time_ist"):
+            print(f"FEED CLOCK   : {session_meta.get('current_time_ist')}")
     if client.last_market_errors:
         for item in client.last_market_errors[:10]:
             print(f"  - {item}")
@@ -316,6 +295,12 @@ def main(argv: list[str] | None = None) -> int:
         return 32
 
     print_candidate("🏆 #1 BEST SIGNAL FROM AVAILABLE HEALTHY STOCKS", selected)
+    selected_data = parsed.get(selected.symbol)
+    if selected_data and selected_data.candles:
+        latest_bar = selected_data.candles[-1]
+        print(f"LATEST CANDLE: {latest_bar.ts:%Y-%m-%d %H:%M:%S %Z}")
+        print(f"CANDLE COUNT : {len(selected_data.candles)}")
+        print(f"LATEST CLOSE : ₹{latest_bar.close:.4f}")
     print("\nSTATUS: SIGNAL_READY")
     print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
@@ -329,6 +314,11 @@ def main(argv: list[str] | None = None) -> int:
         duplicates=len(client.last_market_duplicates),
         candidate_count=len(candidates),
         selected=asdict(selected),
+        feed_endpoint=meta.get("endpoint") if isinstance(meta, dict) else None,
+        feed_status=meta.get("status") if isinstance(meta, dict) else None,
+        feed_clock=(meta.get("session") or {}).get("current_time_ist") if isinstance(meta.get("session"), dict) else None,
+        selected_latest_candle=selected_data.candles[-1].ts.isoformat() if selected_data and selected_data.candles else None,
+        selected_candle_count=len(selected_data.candles) if selected_data else 0,
     )
     return 0
 

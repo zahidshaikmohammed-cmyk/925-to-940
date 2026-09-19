@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import gzip
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
+from time import time_ns
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from strategy_930 import Candle
 
 IST = ZoneInfo("Asia/Kolkata")
-SHARDS = tuple(f"live-{x}.json" for x in "abcdefghij")
+ENDPOINT_PATH = "public/live-j.json"
+EXPECTED_UNIVERSE = 990
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
@@ -27,21 +28,18 @@ class Health:
 class StockData:
     symbol: str
     candles: tuple[Candle, ...]
-    # The endpoint is 1m-OHLCV only. For execution/ranking the engine uses
-    # the latest completed 1m close as the current observable price.
     ltp: float
-    # Optional endpoint metadata. Strategy calculations do not depend on it.
     previous_close: float | None
     health: Health
 
 
 class PsygridClient:
-    """Client for the canonical PSYGRID public 1-minute OHLCV feed.
+    """Client for the canonical PSYGRID 990-stock public 1-minute OHLCV feed.
 
-    Canonical stock schema:
-      symbol, security_id, candles_1m[]
-    Optional metadata such as previous_close/today_open may exist, but is not
-    required for signal generation. No 5m/15m/depth/LTP-timestamp feed is used.
+    Canonical endpoint: /public/live-j.json
+    Top-level schema: universe_size, stock_count, stocks
+    Stock schema: symbol, security_id, previous_close, today_open, candles_1m[]
+    No 5m/15m/depth/LTP-timestamp feed is used.
     """
 
     def __init__(self, base_url: str, timeout: float = 4.0):
@@ -50,16 +48,20 @@ class PsygridClient:
         self.last_market_errors: tuple[str, ...] = ()
         self.last_market_coverage: int = 0
         self.last_market_duplicates: tuple[str, ...] = ()
+        self.last_market_meta: dict = {}
 
-    def _get(self, path: str):
+    def _get(self, path: str = ENDPOINT_PATH):
+        url = self.base + "/" + path.lstrip("/")
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}_ts={time_ns()}"
         req = Request(
-            self.base + "/" + path.lstrip("/"),
+            url,
             headers={
                 "Accept": "application/json",
                 "Accept-Encoding": "gzip",
                 "Cache-Control": "no-cache, no-store, max-age=0",
                 "Pragma": "no-cache",
-                "User-Agent": "PSYGRID-925-TO-940/3.0",
+                "User-Agent": "PSYGRID-925-TO-940/4.0",
             },
         )
         with urlopen(req, timeout=self.timeout) as response:
@@ -69,81 +71,98 @@ class PsygridClient:
             return json.loads(body.decode("utf-8"))
 
     def preflight_all(self) -> dict[str, dict]:
-        """Check every public shard independently; never make one shard fatal."""
-        results: dict[str, dict] = {}
-        with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
-            futures = {executor.submit(self._get, f"public/{shard}"): shard for shard in SHARDS}
-            for future in as_completed(futures):
-                shard = futures[future]
-                try:
-                    payload = future.result()
-                    if not isinstance(payload, dict):
-                        results[shard] = {"ok": False, "count": 0, "error": "payload is not an object"}
-                        continue
-                    stocks = payload.get("stocks")
-                    if not isinstance(stocks, dict):
-                        results[shard] = {"ok": False, "count": 0, "error": "missing/invalid stocks object"}
-                        continue
-                    count = len(stocks)
-                    declared = payload.get("stock_count")
-                    # A shard is operational if its declared and actual counts
-                    # agree with the intended 45-stock partition.
-                    ok = count == 45 and declared == 45
-                    results[shard] = {
-                        "ok": ok,
-                        "count": count,
-                        "declared": declared,
-                        "error": None if ok else f"declared={declared}, records={count}, expected=45",
-                    }
-                except Exception as exc:
-                    results[shard] = {"ok": False, "count": 0, "error": str(exc)}
-        return {shard: results.get(shard, {"ok": False, "count": 0, "error": "no result"}) for shard in SHARDS}
+        """Validate the single atomic 990-stock endpoint."""
+        try:
+            payload = self._get(ENDPOINT_PATH)
+            if not isinstance(payload, dict):
+                return {ENDPOINT_PATH: {"ok": False, "count": 0, "error": "payload is not an object"}}
+            stocks = payload.get("stocks")
+            if not isinstance(stocks, dict):
+                return {ENDPOINT_PATH: {"ok": False, "count": 0, "error": "missing/invalid stocks object"}}
+            count = len(stocks)
+            declared = payload.get("stock_count")
+            universe = payload.get("universe_size")
+            errors: list[str] = []
+            if universe not in (None, EXPECTED_UNIVERSE):
+                errors.append(f"universe_size={universe}, expected={EXPECTED_UNIVERSE}")
+            if declared != count:
+                errors.append(f"declared stock_count={declared}, actual records={count}")
+            if count == 0:
+                errors.append("no stock records available")
+            return {
+                ENDPOINT_PATH: {
+                    "ok": not errors,
+                    "count": count,
+                    "declared": declared,
+                    "universe_size": universe,
+                    "error": "; ".join(errors) if errors else None,
+                }
+            }
+        except Exception as exc:
+            return {ENDPOINT_PATH: {"ok": False, "count": 0, "error": str(exc)}}
 
     def market(self) -> dict:
-        """Fetch all shards and retain every valid unique stock payload."""
-        out: dict = {}
+        """Fetch one atomic 990-stock snapshot and retain every valid stock payload."""
         errors: list[str] = []
         duplicates: list[str] = []
+        try:
+            payload = self._get(ENDPOINT_PATH)
+        except Exception as exc:
+            self.last_market_errors = (f"{ENDPOINT_PATH}: {exc}",)
+            self.last_market_coverage = 0
+            self.last_market_duplicates = ()
+            self.last_market_meta = {}
+            raise RuntimeError(f"990-stock endpoint unavailable: {exc}") from exc
 
-        with ThreadPoolExecutor(max_workers=len(SHARDS)) as executor:
-            futures = {executor.submit(self._get, f"public/{s}"): s for s in SHARDS}
-            for future in as_completed(futures):
-                shard = futures[future]
-                try:
-                    payload = future.result()
-                    if not isinstance(payload, dict):
-                        errors.append(f"{shard}: payload is not an object")
-                        continue
-                    stocks = payload.get("stocks")
-                    if not isinstance(stocks, dict):
-                        errors.append(f"{shard}: missing/invalid stocks object")
-                        continue
-                    declared = payload.get("stock_count")
-                    if declared != 45:
-                        errors.append(f"{shard}: declared stock_count={declared}, expected 45; valid records retained")
-                    for symbol, stock in stocks.items():
-                        if not isinstance(symbol, str) or not symbol.strip():
-                            errors.append(f"{shard}: invalid blank symbol skipped")
-                            continue
-                        if symbol in out:
-                            duplicates.append(symbol)
-                            continue
-                        if not isinstance(stock, dict):
-                            errors.append(f"{shard}: {symbol}: invalid stock payload skipped")
-                            continue
-                        out[symbol] = stock
-                except Exception as exc:
-                    errors.append(f"{shard}: {exc}")
+        if not isinstance(payload, dict):
+            raise RuntimeError("990-stock endpoint returned a non-object payload")
+        stocks = payload.get("stocks")
+        if not isinstance(stocks, dict):
+            raise RuntimeError("990-stock endpoint missing/invalid stocks object")
+
+        declared = payload.get("stock_count")
+        universe = payload.get("universe_size")
+        service_status = payload.get("status")
+        session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+
+        if universe not in (None, EXPECTED_UNIVERSE):
+            errors.append(f"endpoint universe_size={universe}, expected={EXPECTED_UNIVERSE}")
+        if declared != len(stocks):
+            errors.append(
+                f"endpoint declared stock_count={declared}, actual records={len(stocks)}; valid records retained"
+            )
+
+        out: dict = {}
+        for symbol, stock in stocks.items():
+            if not isinstance(symbol, str) or not symbol.strip():
+                errors.append("invalid blank symbol skipped")
+                continue
+            if not isinstance(stock, dict):
+                errors.append(f"{symbol}: invalid stock payload skipped")
+                continue
+            if symbol in out:
+                duplicates.append(symbol)
+                continue
+            out[symbol] = stock
 
         self.last_market_errors = tuple(errors)
         self.last_market_duplicates = tuple(sorted(set(duplicates)))
         self.last_market_coverage = len(out)
+        self.last_market_meta = {
+            "endpoint": ENDPOINT_PATH,
+            "universe_size": universe,
+            "declared_stock_count": declared,
+            "actual_stock_count": len(stocks),
+            "status": service_status,
+            "session": session,
+        }
+
         if errors:
-            print(f"[FEED-WARN] {len(errors)} shard/record issue(s); affected items skipped")
+            print(f"[FEED-WARN] {len(errors)} endpoint/schema issue(s); valid records retained")
         if duplicates:
             print(f"[FEED-WARN] {len(set(duplicates))} duplicate symbol(s); duplicate copies skipped")
         if not out:
-            raise RuntimeError("all shards failed or returned no valid stocks")
+            raise RuntimeError("990-stock endpoint returned no valid stock records")
         return out
 
     @staticmethod
@@ -186,17 +205,9 @@ class PsygridClient:
         return tuple(sorted(out, key=lambda c: c.ts))
 
     def stock(self, symbol: str, payload: dict, now: datetime | None = None) -> StockData:
-        """Create a stock snapshot from the endpoint's 1m OHLCV series.
-
-        There is deliberately NO stale-LTP check. The endpoint does not expose
-        a separate LTP timestamp. The latest completed 1m close is the current
-        observable price, and only session candle availability is validated.
-        """
+        """Create a stock snapshot from the endpoint's 1m OHLCV series."""
         now_ist = (now or datetime.now(IST)).astimezone(IST)
         reasons: list[str] = []
-
-        # Canonical endpoint key is candles_1m. Keep a read-only compatibility
-        # fallback for older fixtures; no 5m/15m data is consumed.
         rows = payload.get("candles_1m")
         if rows is None:
             rows = payload.get("1m", [])
@@ -206,7 +217,6 @@ class PsygridClient:
             c for c in all_candles
             if c.ts.astimezone(IST).date() == now_ist.date()
             and SESSION_START <= c.ts.astimezone(IST).time() < MARKET_CLOSE
-            # Never use the currently forming minute as completed OHLCV.
             and c.ts.astimezone(IST) < now_ist.replace(second=0, microsecond=0)
         )
         if len(session) < 5:
@@ -223,8 +233,6 @@ class PsygridClient:
                 previous_close = None
         except (TypeError, ValueError):
             previous_close = None
-        # previous_close and today_open are optional metadata only. They never
-        # affect health or signal generation.
 
         return StockData(
             symbol=symbol,

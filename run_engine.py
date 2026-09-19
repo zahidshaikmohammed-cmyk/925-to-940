@@ -232,18 +232,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Market session is closed. Last live scan window ended at {MARKET_CLOSE.strftime('%H:%M')} IST.")
         return 23
 
-    preflight_ok, preflight_results = preflight(client)
-    print_preflight(preflight_results)
-    audit.event("PREFLIGHT", ok=preflight_ok, shards=preflight_results)
     if args.preflight_only:
+        preflight_ok, preflight_results = preflight(client)
+        print_preflight(preflight_results)
+        audit.event("PREFLIGHT", ok=preflight_ok, endpoint=ENDPOINT_PATH, results=preflight_results)
         return 0 if preflight_ok else 21
 
+    # Normal scans fetch exactly one atomic 990-stock snapshot. This avoids
+    # scoring one snapshot after preflighting a different snapshot.
     try:
         raw = client.market()
     except Exception as exc:
         print(f"FATAL: no usable stock feed returned: {exc}")
         audit.event("FATAL_NO_USABLE_FEED", error=str(exc))
         return 30
+
+    meta = client.last_market_meta
+    preflight_results = {
+        ENDPOINT_PATH: {
+            "ok": bool(raw),
+            "count": len(raw),
+            "declared": meta.get("declared_stock_count"),
+            "universe_size": meta.get("universe_size"),
+            "error": None if not client.last_market_errors else "; ".join(client.last_market_errors),
+        }
+    }
+    print_preflight(preflight_results)
+    audit.event("PREFLIGHT", ok=bool(raw), endpoint=ENDPOINT_PATH, results=preflight_results)
 
     scan_time = now_ist()
     parsed = {symbol: client.stock(symbol, payload, scan_time) for symbol, payload in raw.items()}

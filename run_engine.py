@@ -10,7 +10,7 @@ from statistics import median
 from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
-from psygrid_client import ENDPOINT_PATH, EXPECTED_UNIVERSE, PsygridClient, StockData
+from psygrid_client import ENDPOINT_PATH, EXPECTED_UNIVERSE, Health, PsygridClient, StockData
 from strategy_930 import Candidate, evaluate_tiers
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -114,6 +114,29 @@ def market_return(data: dict[str, StockData]) -> float:
         if d.health.healthy and len(d.candles) >= 5
     ]
     return median(values) if values else 0.0
+
+
+def parse_universe(client: PsygridClient, raw: dict[str, dict], scan_time: datetime) -> dict[str, StockData]:
+    """Parse every raw stock payload into a StockData, symbol by symbol.
+
+    A single malformed payload must never abort the snapshot: any parsing
+    exception is caught per-symbol, that symbol is recorded unhealthy with
+    the exception as its reason, and every other symbol is still parsed.
+    """
+    parsed: dict[str, StockData] = {}
+    for symbol, payload in raw.items():
+        try:
+            parsed[symbol] = client.stock(symbol, payload, scan_time)
+        except Exception as exc:
+            print(f"[PARSE-WARN] {symbol}: {exc}", flush=True)
+            parsed[symbol] = StockData(
+                symbol=symbol,
+                candles=(),
+                ltp=0.0,
+                previous_close=None,
+                health=Health(symbol, False, f"parse_exception:{exc}"),
+            )
+    return parsed
 
 
 def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
@@ -261,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     audit.event("PREFLIGHT", ok=bool(raw), endpoint=ENDPOINT_PATH, results=preflight_results)
 
     scan_time = now_ist()
-    parsed = {symbol: client.stock(symbol, payload, scan_time) for symbol, payload in raw.items()}
+    parsed = parse_universe(client, raw, scan_time)
     healthy = {s: d for s, d in parsed.items() if d.health.healthy}
     unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
 

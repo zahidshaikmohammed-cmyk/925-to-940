@@ -4,6 +4,7 @@ import gzip
 import json
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
+from math import isfinite
 from time import time_ns
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -15,6 +16,25 @@ ENDPOINT_PATH = "public/live-j.json"
 EXPECTED_UNIVERSE = 990
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
+
+
+class _DuplicateAwareDict(dict):
+    """dict built from raw JSON (key, value) pairs that remembers repeats.
+
+    ``json.loads`` silently collapses a JSON object's duplicate keys and
+    keeps only the last value. That is a reasonable resolution, but a
+    malformed/buggy upstream feed that emits the same stock symbol twice
+    must not have that fact silently erased before our own duplicate
+    audit (``last_market_duplicates``) ever gets a chance to see it.
+    """
+
+    def __init__(self, pairs):
+        super().__init__()
+        self.duplicate_keys: list[str] = []
+        for key, value in pairs:
+            if key in self:
+                self.duplicate_keys.append(key)
+            self[key] = value
 
 
 @dataclass(frozen=True)
@@ -68,7 +88,7 @@ class PsygridClient:
             body = response.read()
             if response.headers.get("Content-Encoding", "").lower() == "gzip":
                 body = gzip.decompress(body)
-            return json.loads(body.decode("utf-8"))
+            return json.loads(body.decode("utf-8"), object_pairs_hook=_DuplicateAwareDict)
 
     def preflight_all(self) -> dict[str, dict]:
         """Validate the single atomic 990-stock endpoint."""
@@ -132,6 +152,12 @@ class PsygridClient:
                 f"endpoint declared stock_count={declared}, actual records={len(stocks)}; valid records retained"
             )
 
+        # json.loads() already collapses duplicate JSON object keys (keeping
+        # the last value) before this loop ever runs. _DuplicateAwareDict
+        # preserves that fact so a feed bug that repeats a symbol is
+        # reported, not silently invisible.
+        duplicates.extend(getattr(stocks, "duplicate_keys", []))
+
         out: dict = {}
         for symbol, stock in stocks.items():
             if not isinstance(symbol, str) or not symbol.strip():
@@ -185,14 +211,20 @@ class PsygridClient:
             if not isinstance(row, dict) or row.get("complete", True) is False:
                 continue
             try:
-                candle = Candle(
-                    cls._ts(row["timestamp"]),
+                o, h, l, c, v = (
                     float(row["open"]),
                     float(row["high"]),
                     float(row["low"]),
                     float(row["close"]),
                     float(row["volume"]),
                 )
+                # float() parses "NaN"/"Infinity" without raising, and NaN
+                # comparisons are always False -- the <= 0 / geometry checks
+                # below would silently let non-finite values through and
+                # corrupt every downstream ATR/VWAP/median computation.
+                if not all(isfinite(x) for x in (o, h, l, c, v)):
+                    continue
+                candle = Candle(cls._ts(row["timestamp"]), o, h, l, c, v)
                 if candle.open <= 0 or candle.high <= 0 or candle.low <= 0 or candle.close <= 0:
                     continue
                 if candle.high < max(candle.open, candle.close) or candle.low > min(candle.open, candle.close):

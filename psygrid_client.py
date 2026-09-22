@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from strategy_930 import Candle
 
 IST = ZoneInfo("Asia/Kolkata")
-ENDPOINT_PATH = "public/live-j.json"
+ENDPOINT_PATH = "public/live.json"
 EXPECTED_UNIVERSE = 990
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
@@ -56,7 +56,9 @@ class StockData:
 class PsygridClient:
     """Client for the canonical PSYGRID 990-stock public 1-minute OHLCV feed.
 
-    Canonical endpoint: /public/live-j.json
+    Canonical endpoint: /public/live.json (the single atomic 990-stock
+    snapshot -- not one of the retired per-shard live-a.json..live-j.json
+    endpoints).
     Top-level schema: universe_size, stock_count, stocks
     Stock schema: symbol, security_id, previous_close, today_open, candles_1m[]
     No 5m/15m/depth/LTP-timestamp feed is used.

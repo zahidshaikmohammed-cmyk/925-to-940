@@ -141,7 +141,7 @@ class StrategyTests(unittest.TestCase):
         self.assertNotIn("stale", d.health.reason)
 
     def test_990_endpoint_constants_are_canonical(self):
-        self.assertEqual(ENDPOINT_PATH, "public/live-j.json")
+        self.assertEqual(ENDPOINT_PATH, "public/live.json")
         self.assertEqual(EXPECTED_UNIVERSE, 990)
 
     def test_single_990_endpoint_snapshot_retains_partial_valid_universe(self):

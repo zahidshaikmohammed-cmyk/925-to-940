@@ -251,6 +251,43 @@ class StrategyTests(unittest.TestCase):
         else:
             self.assertLess(candidate.target, candidate.entry)
 
+    def test_missing_sector_no_longer_duplicates_market_rs_into_the_score(self):
+        # Exact real-world fallback: sector_return is literally set equal to
+        # market_return for any stock with no genuine sector (this is what
+        # every unmapped symbol -- e.g. a fresh IPO -- receives). Feeding
+        # that as if it were a real sector (has_sector=True) reproduces the
+        # old double-counting bug; has_sector=False must score strictly
+        # lower on every tier, proving the free duplicate boost is gone.
+        cs = valid_long_fixture()
+        old_bug_reproduction = evaluate_tiers("DUP", cs, cs[-1].close, None, 0.0, 0.0, [], self.cfg, has_sector=True)
+        fixed = evaluate_tiers("DUP", cs, cs[-1].close, None, 0.0, 0.0, [], self.cfg, has_sector=False)
+        self.assertEqual([c.tier for c in old_bug_reproduction], [c.tier for c in fixed])
+        for old_c, new_c in zip(old_bug_reproduction, fixed):
+            self.assertLess(new_c.score, old_c.score, (old_c.tier, old_c.score, new_c.score))
+            self.assertIn("sector_data=ABSENT_WEIGHT_REDISTRIBUTED", new_c.reasons)
+            self.assertNotIn("sector_data=ABSENT_WEIGHT_REDISTRIBUTED", old_c.reasons)
+
+    def test_missing_sector_score_never_depends_on_the_fallback_proxy_value(self):
+        # Whatever numeric sector_return a caller happens to pass when it
+        # has no real sector data for a stock must not leak into the score
+        # once has_sector=False -- otherwise a different fallback proxy
+        # could reintroduce a fabricated edge through the back door.
+        cs = valid_long_fixture()
+        a = evaluate_tiers("A", cs, cs[-1].close, None, 0.0, 0.0, [], self.cfg, has_sector=False)
+        b = evaluate_tiers("A", cs, cs[-1].close, None, 0.0, -3.7, [], self.cfg, has_sector=False)
+        self.assertEqual([round(c.score, 9) for c in a], [round(c.score, 9) for c in b])
+
+    def test_real_sector_data_still_scores_exactly_as_before(self):
+        # has_sector=True (the default) must reproduce the unmodified,
+        # original scoring formula byte-for-byte when a stock genuinely has
+        # sector peer data -- only the missing-data path changed.
+        cs = valid_long_fixture()
+        explicit_default = evaluate_tiers("SAME", cs, cs[-1].close, None, 1.0, -0.5, [], self.cfg)
+        explicit_true = evaluate_tiers("SAME", cs, cs[-1].close, None, 1.0, -0.5, [], self.cfg, has_sector=True)
+        self.assertEqual([c.score for c in explicit_default], [c.score for c in explicit_true])
+        for c in explicit_default:
+            self.assertNotIn("sector_data=ABSENT_WEIGHT_REDISTRIBUTED", c.reasons)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

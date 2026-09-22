@@ -161,11 +161,12 @@ def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: S
     candidates: list[Candidate] = []
     for symbol, d in healthy.items():
         sector = sectors.get(symbol)
-        sector_return = median(peer_returns[sector]) if sector and peer_returns.get(sector) else mkt
+        has_sector = bool(sector and peer_returns.get(sector))
+        sector_return = median(peer_returns[sector]) if has_sector else mkt
         try:
             candidates.extend(evaluate_tiers(
                 symbol, d.candles, d.ltp, d.previous_close,
-                mkt, sector_return, gap_history, cfg,
+                mkt, sector_return, gap_history, cfg, has_sector=has_sector,
             ))
         except Exception as exc:
             print(f"[EVAL-WARN] {symbol}: {exc}", flush=True)

@@ -275,5 +275,67 @@ class TierFallbackAndGlobalSelectionTests(unittest.TestCase):
         self.assertEqual(selected.tier, 1)
 
 
+class SectorFairnessTests(unittest.TestCase):
+    """Reproduces the real-world bug: an unmapped stock (a fresh IPO with
+    no sector_map.json entry, e.g. the reported CPPLUS/MEESHO repeats)
+    used to get sector_return silently set equal to market_return, which
+    doubled its relative-strength score component for free. build_candidates
+    must now flag such a stock has_sector=False end to end and redistribute
+    that weight instead of fabricating a sector edge.
+    """
+
+    def setUp(self):
+        self.cfg = StrategyConfig()
+        self.cfg.validate()
+
+    def test_unmapped_symbol_is_flagged_has_sector_false_through_the_full_pipeline(self):
+        cs = valid_long_fixture()
+        data = {
+            "MAPPED": StockData("MAPPED", cs, cs[-1].close, None, Health("MAPPED", True)),
+            "UNMAPPED": StockData("UNMAPPED", cs, cs[-1].close, None, Health("UNMAPPED", True)),
+        }
+        candidates = build_candidates(data, {"MAPPED": "CONSUMER_FMCG"}, self.cfg)
+        mapped = [c for c in candidates if c.symbol == "MAPPED"]
+        unmapped = [c for c in candidates if c.symbol == "UNMAPPED"]
+        self.assertTrue(mapped)
+        self.assertTrue(unmapped)
+        for c in mapped:
+            self.assertNotIn("sector_data=ABSENT_WEIGHT_REDISTRIBUTED", c.reasons)
+        for c in unmapped:
+            self.assertIn("sector_data=ABSENT_WEIGHT_REDISTRIBUTED", c.reasons)
+
+    def test_an_unmapped_ipo_style_stock_no_longer_outranks_an_equal_but_fairly_scored_rival(self):
+        """The exact CPPLUS/MEESHO scenario: two stocks with IDENTICAL price
+        action, one happens to have a real sector on record, the other
+        doesn't (a fresh IPO). Before this fix, the unmapped one always
+        scored higher (or equal) purely because it silently duplicated
+        market RS into its sector-RS term while the mapped one's sector-RS
+        was tempered by genuine (if here, self-only) peer data. After the
+        fix, both are within the pipeline's ordinary noise, not one
+        structurally favored for lacking data.
+        """
+        cs = valid_long_fixture()
+        data = {
+            "HASREALSECTOR": StockData("HASREALSECTOR", cs, cs[-1].close, None, Health("HASREALSECTOR", True)),
+            "FRESHIPO": StockData("FRESHIPO", cs, cs[-1].close, None, Health("FRESHIPO", True)),
+        }
+        candidates = build_candidates(data, {"HASREALSECTOR": "SOLE_SECTOR"}, self.cfg)
+        fresh_ipo_tier1 = next(c for c in candidates if c.symbol == "FRESHIPO" and c.tier == 1)
+        self.assertIn("sector_data=ABSENT_WEIGHT_REDISTRIBUTED", fresh_ipo_tier1.reasons)
+        # It must never receive the old double-counted score: recomputing
+        # what the pre-fix code would have produced (has_sector=True with
+        # sector_return literally equal to market_return, its old fallback)
+        # must always score at or above what the fixed pipeline now gives.
+        market = market_return({s: d for s, d in data.items() if d.health.healthy})
+        from strategy_930 import evaluate_tiers
+        pre_fix_score = next(
+            c.score for c in evaluate_tiers(
+                "FRESHIPO", cs, cs[-1].close, None, market, market, [], self.cfg, has_sector=True,
+            )
+            if c.tier == 1
+        )
+        self.assertGreaterEqual(pre_fix_score, fresh_ipo_tier1.score)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

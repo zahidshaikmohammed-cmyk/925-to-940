@@ -228,6 +228,7 @@ def _emergency_candidate(
     market_return: float,
     sector_return: float,
     cfg: StrategyConfig,
+    has_sector: bool = True,
 ) -> Candidate | None:
     """Tier 3: always rank a healthy stock, but never pretend it has a setup."""
     a = atr(cs, cfg.atr_period)
@@ -276,14 +277,29 @@ def _emergency_candidate(
     )
     no_retrace_penalty = 20.0 if not leg else 0.0
 
-    score = 100.0 * (
-        0.22 * momentum_score
-        + 0.20 * retracement_score
-        + 0.20 * rs_score
-        + 0.10 * srs_score
-        + 0.12 * vwap_score
-        + 0.16 * structure_score
-    ) - extension_penalty - no_retrace_penalty
+    if has_sector:
+        score = 100.0 * (
+            0.22 * momentum_score
+            + 0.20 * retracement_score
+            + 0.20 * rs_score
+            + 0.10 * srs_score
+            + 0.12 * vwap_score
+            + 0.16 * structure_score
+        ) - extension_penalty - no_retrace_penalty
+    else:
+        # No genuine sector data for this stock: sector_return silently
+        # equalled market_return, which would make srs a duplicate of rs
+        # rather than an independent signal. Drop that term instead of
+        # scoring a fabricated "sector edge", and redistribute its 0.10
+        # weight proportionally across the remaining (already 0.90-summed)
+        # terms so a fairly-scored stock is compared on equal footing.
+        score = 100.0 * (
+            0.22 * momentum_score
+            + 0.20 * retracement_score
+            + 0.20 * rs_score
+            + 0.12 * vwap_score
+            + 0.16 * structure_score
+        ) / 0.90 - extension_penalty - no_retrace_penalty
     if not leg:
         score = min(score, 58.0)
 
@@ -312,7 +328,7 @@ def _emergency_candidate(
         f"rs_sector={srs:+.3f}%",
         f"vw_dist_atr={vw_dist:+.3f}",
         f"extension_penalty={extension_penalty:.2f}",
-    )
+    ) + (() if has_sector else ("sector_data=ABSENT_WEIGHT_REDISTRIBUTED",))
     return Candidate(
         symbol=symbol,
         side=name,
@@ -348,6 +364,7 @@ def _build_candidate(
     gap_z: float,
     cfg: StrategyConfig,
     tier: int,
+    has_sector: bool = True,
 ):
     a = atr(cs, cfg.atr_period)
     if a <= 0:
@@ -418,16 +435,34 @@ def _build_candidate(
     sw = scale(max(vw_dist, 0.0), 0.0, 1.25)
     st = 0.5 * clamp(eff) + 0.5 * clamp(reclaim)
     sx = scale(impulse_atr, 0.5, 2.5)
-    score = 100.0 * (
-        cfg.w_impulse * si
-        + cfg.w_retracement * sr
-        + cfg.w_relative_strength * sm
-        + cfg.w_sector_strength * ssr
-        + cfg.w_volume * sv
-        + cfg.w_vwap * sw
-        + cfg.w_structure * st
-        + cfg.w_volatility * sx
-    )
+    if has_sector:
+        score = 100.0 * (
+            cfg.w_impulse * si
+            + cfg.w_retracement * sr
+            + cfg.w_relative_strength * sm
+            + cfg.w_sector_strength * ssr
+            + cfg.w_volume * sv
+            + cfg.w_vwap * sw
+            + cfg.w_structure * st
+            + cfg.w_volatility * sx
+        )
+    else:
+        # No genuine sector data for this stock: sector_return silently
+        # equalled market_return, which would make ssr a duplicate of sm
+        # rather than an independent signal. Drop that term instead of
+        # scoring a fabricated "sector edge", and redistribute its weight
+        # proportionally across the remaining terms so a stock is never
+        # scored higher merely for lacking sector classification.
+        active_weight = 1.0 - cfg.w_sector_strength
+        score = 100.0 * (
+            cfg.w_impulse * si
+            + cfg.w_retracement * sr
+            + cfg.w_relative_strength * sm
+            + cfg.w_volume * sv
+            + cfg.w_vwap * sw
+            + cfg.w_structure * st
+            + cfg.w_volatility * sx
+        ) / active_weight
     if tier > 1:
         score -= 8.0 * (tier - 1)
 
@@ -448,7 +483,7 @@ def _build_candidate(
         f"vol_ratio={vol_ratio:.3f}",
         f"persistence={persistence:.3f}",
         f"vw_dist_atr={vw_dist:.3f}",
-    )
+    ) + (() if has_sector else ("sector_data=ABSENT_WEIGHT_REDISTRIBUTED",))
     return Candidate(
         symbol=symbol,
         side=name,
@@ -482,6 +517,7 @@ def evaluate(
     gap_history: Iterable[float],
     cfg: StrategyConfig,
     tier: int = 1,
+    has_sector: bool = True,
 ):
     cs = session_candles(candles)
     if len(cs) < cfg.min_completed_1m or any(not finite_ohlcv(c) for c in cs):
@@ -493,7 +529,7 @@ def evaluate(
         candidates = [
             _emergency_candidate(
                 symbol, side, name, cs, entry, previous_close,
-                market_return, sector_return, cfg,
+                market_return, sector_return, cfg, has_sector,
             )
             for side, name in ((1, "LONG"), (-1, "SHORT"))
         ]
@@ -507,7 +543,7 @@ def evaluate(
     candidates = [
         _build_candidate(
             symbol, side, name, cs, entry, previous_close,
-            market_return, sector_return, 0.0, cfg, tier,
+            market_return, sector_return, 0.0, cfg, tier, has_sector,
         )
         for side, name in ((1, "LONG"), (-1, "SHORT"))
     ]
@@ -527,12 +563,13 @@ def evaluate_tiers(
     sector_return: float,
     gap_history: Iterable[float],
     cfg: StrategyConfig,
+    has_sector: bool = True,
 ) -> list[Candidate]:
     out: list[Candidate] = []
     for tier in (1, 2, 3):
         candidate = evaluate(
             symbol, candles, entry, previous_close,
-            market_return, sector_return, gap_history, cfg, tier=tier,
+            market_return, sector_return, gap_history, cfg, tier=tier, has_sector=has_sector,
         )
         if candidate is not None:
             out.append(candidate)

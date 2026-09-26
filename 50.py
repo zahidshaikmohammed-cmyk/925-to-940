@@ -93,10 +93,22 @@ def print_banner(constituents_meta: dict) -> None:
     print("Evaluates every available NIFTY 50 constituent in both LONG and SHORT | returns one #1")
     print(f"Target universe: {NIFTY50_TARGET_UNIVERSE} | unavailable/malformed constituents are skipped, never fabricated")
     print("This is an isolated, experimental A/B universe variant -- it does not alter the 990-stock engine.")
-    if constituents_meta.get("status") == "UNVERIFIED_BEST_EFFORT":
+    status = constituents_meta.get("status", "UNKNOWN")
+    valid_through = constituents_meta.get("valid_through")
+    print(
+        f"Constituent list status: {status} | as_of={constituents_meta.get('as_of', 'unknown')} "
+        f"| valid_through={valid_through or 'unknown'}"
+    )
+    if status != "USER_VERIFIED":
         print("-" * 96)
-        print(f"WARNING: constituent list status = UNVERIFIED_BEST_EFFORT (as_of {constituents_meta.get('as_of')})")
-        print(f"         {constituents_meta.get('action_required', '')}")
+        print(f"WARNING: constituent list status = {status}")
+        if constituents_meta.get("action_required"):
+            print(f"         {constituents_meta['action_required']}")
+    if valid_through and now_ist().date().isoformat() > valid_through:
+        print("-" * 96)
+        print(f"WARNING: constituent list valid_through={valid_through} has PASSED. Re-verify before trusting this list.")
+    for change in constituents_meta.get("pending_index_changes", []):
+        print(f"PENDING CHANGE (effective {change.get('effective')}): {change.get('change')} -- {change.get('status')}")
     print("=" * 96)
 
 

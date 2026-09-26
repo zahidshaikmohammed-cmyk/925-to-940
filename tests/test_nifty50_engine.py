@@ -88,6 +88,20 @@ class ConstituentFileTests(unittest.TestCase):
         self.assertEqual(len(meta["symbols"]), 50)
         self.assertEqual(len(set(meta["symbols"])), 50)
 
+    def test_user_verified_list_is_active_and_bse_is_not_yet_included(self):
+        # The user replaced the UNVERIFIED_BEST_EFFORT list with one verified
+        # against official NSE Indices sources, valid through 2026-09-29.
+        # WIPRO -> BSE is documented as a pending change effective 2026-09-30
+        # and must be metadata only -- BSE must not appear in the active
+        # universe before that date, and WIPRO must still be in it.
+        meta = nifty50_engine.load_nifty50_constituents()
+        self.assertEqual(meta.get("status"), "USER_VERIFIED")
+        self.assertEqual(meta.get("valid_through"), "2026-09-29")
+        self.assertIn("WIPRO", meta["symbols"])
+        self.assertNotIn("BSE", meta["symbols"])
+        pending = meta.get("pending_index_changes", [])
+        self.assertTrue(any(p.get("change") == "WIPRO -> BSE" and p.get("effective") == "2026-09-30" for p in pending))
+
     def test_missing_file_is_a_reported_failure_not_a_fabricated_list(self):
         with self.assertRaises(FileNotFoundError):
             nifty50_engine.load_nifty50_constituents(Path("/nonexistent/nifty50_constituents.json"))

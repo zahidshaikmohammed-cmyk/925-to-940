@@ -2,31 +2,34 @@
   "index": "NIFTY_50",
   "target_universe": 50,
   "as_of": "2026-09-26",
-  "status": "UNVERIFIED_BEST_EFFORT",
-  "source": "Best-effort research (Claude WebSearch result snippets + trained knowledge as of ~January 2026). This is NOT a verbatim download of the official NSE Indices constituent file.",
-  "verification_blocked_reason": "Outbound network access from the build environment to niftyindices.com, en.wikipedia.org, and dhan.co all returned EGRESS_BLOCKED at the time this file was generated, so the authoritative CSV (https://niftyindices.com/IndexConstituent/ind_nifty50list.csv) could not be fetched or diffed against directly.",
-  "action_required": "Before trusting any signal produced by 50.py, download the current constituent CSV from https://niftyindices.com/IndexConstituent/ind_nifty50list.csv yourself and reconcile the 'symbols' list below against it. Replace this file's 'symbols' array (and bump 'as_of') as often as NSE Indices revises the index -- nominally the last trading day of March and September, but ad hoc changes also occur.",
-  "pending_index_changes_effective_2026_09_30": [
-    "Multiple sources (search snippets, not independently confirmed here) report NSE Indices changes to Nifty 50 effective 2026-09-30: Wipro (WIPRO) exiting to Nifty Next 50, BSE Ltd (BSE) entering. Some sources described a larger reshuffle also naming Indian Hotels, Lodha Developers, REC, Shree Cement and United Spirits as exiting and Hitachi Energy India, Polycab India, Vedanta Aluminium Metal and Vodafone Idea as entering -- this could not be reconciled precisely from this environment. This file reflects WIPRO as still current (pre-2026-09-30). Re-verify after that date regardless."
+  "valid_through": "2026-09-29",
+  "status": "USER_VERIFIED",
+  "source": "User-verified against official NSE Indices sources (replaces the prior UNVERIFIED_BEST_EFFORT list built from WebSearch snippets and trained knowledge -- this environment's outbound network access to niftyindices.com/Wikipedia/Dhan remains EGRESS_BLOCKED, so the user performed the verification directly and supplied this list).",
+  "action_required": "This list is valid through the close of trading on 2026-09-29 only. Re-verify against https://niftyindices.com/IndexConstituent/ind_nifty50list.csv (or another authoritative source) before or at each NSE Indices reconstitution -- nominally the last trading day of March and September, but ad hoc changes also occur -- and whenever the pending change below takes effect.",
+  "pending_index_changes": [
+    {
+      "effective": "2026-09-30",
+      "change": "WIPRO -> BSE",
+      "detail": "WIPRO exits and BSE (BSE Ltd) enters the NIFTY 50, effective after the close of 2026-09-29 / from 2026-09-30 onward.",
+      "status": "DOCUMENTED_ONLY_NOT_YET_APPLIED",
+      "note": "Metadata/documentation only. BSE is deliberately NOT included in the active 'symbols' list below, and WIPRO is deliberately still included, because this list represents the composition in force through 2026-09-29. Do not move BSE into 'symbols' before 2026-09-30; do not remove WIPRO before then either."
+    }
   ],
   "known_gaps_between_this_list_and_the_live_psygrid_feed": {
-    "SBILIFE": "Widely reported NIFTY 50 constituent (SBI Life Insurance) but absent from the live PSYGRID /public/live.json universe at the time this file was built. 50.py will correctly report it as unavailable rather than fabricate data for it.",
-    "LTIM": "Widely reported NIFTY 50 constituent (LTIMindtree) but absent from the live PSYGRID universe at the time this file was built. Same handling as SBILIFE.",
+    "SBILIFE": "Verified current NIFTY 50 constituent (SBI Life Insurance) but absent from the live PSYGRID /public/live.json universe as of this file's last check. 50.py will correctly report it as unavailable rather than fabricate data for it.",
+    "SHRIRAMFIN": "Verified current NIFTY 50 constituent (Shriram Finance) but absent from the live PSYGRID universe as of this file's last check. Same handling as SBILIFE.",
     "TMPV": "Tata Motors demerged into separate passenger-vehicle (TMPV) and commercial-vehicle entities; the PSYGRID universe carries TMPV, not the legacy TATAMOTORS symbol, so this list uses TMPV."
   },
-  "excluded_for_low_confidence": [
-    "UPL", "BPCL", "SHREECEM", "MAXHEALTH", "TRENT", "BSE"
-  ],
   "symbols": [
-    "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS",
-    "ITC", "LT", "KOTAKBANK", "AXISBANK", "SBIN",
-    "HINDUNILVR", "BHARTIARTL", "BAJFINANCE", "ASIANPAINT", "MARUTI",
-    "SUNPHARMA", "TITAN", "ULTRACEMCO", "NESTLEIND", "WIPRO",
-    "HCLTECH", "TMPV", "TATASTEEL", "POWERGRID", "NTPC",
-    "ONGC", "COALINDIA", "ADANIENT", "ADANIPORTS", "JSWSTEEL",
-    "GRASIM", "BAJAJFINSV", "BRITANNIA", "CIPLA", "DRREDDY",
-    "DIVISLAB", "EICHERMOT", "HEROMOTOCO", "HINDALCO", "INDUSINDBK",
-    "M&M", "SBILIFE", "HDFCLIFE", "TECHM", "TATACONSUM",
-    "APOLLOHOSP", "BAJAJ-AUTO", "LTIM", "INDIGO", "JIOFIN"
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BEL", "BHARTIARTL",
+    "CIPLA", "COALINDIA", "DRREDDY", "EICHERMOT", "ETERNAL",
+    "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HINDALCO",
+    "HINDUNILVR", "ICICIBANK", "INDIGO", "INFY", "ITC",
+    "JIOFIN", "JSWSTEEL", "KOTAKBANK", "LT", "M&M",
+    "MARUTI", "MAXHEALTH", "NESTLEIND", "NTPC", "ONGC",
+    "POWERGRID", "RELIANCE", "SBILIFE", "SHRIRAMFIN", "SBIN",
+    "SUNPHARMA", "TCS", "TATACONSUM", "TMPV", "TATASTEEL",
+    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO"
   ]
 }

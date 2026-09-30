@@ -409,7 +409,9 @@ def _forced(symbol: str, cs: list[Candle], side: int, ctx: Context, cfg: OldConf
     vw_score = clamp(1.0 - abs(vw_dist - 0.5) / 1.5) if vw_dist > -0.25 else 0.0
     penalty = 0.0
     penalty += 20.0 * scale(vw_dist, 1.75, 5.0)   # stretched from VWAP
-    penalty += 10.0 if room < 0.3 else 0.0        # buying the high / selling the low
+    # Buying near the high / selling near the low: full penalty at the
+    # extreme, fading out once price has pulled back 1 ATR5 from it.
+    penalty += 25.0 * (1.0 - scale(room, 0.3, 1.0))
     penalty += 10.0 * scale(-trend, 0.0, 2.0)     # against the day's direction
 
     w_sector = 0.05 if srs is not None else 0.0

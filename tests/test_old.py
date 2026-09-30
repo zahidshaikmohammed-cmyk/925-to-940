@@ -98,6 +98,23 @@ class OldEngineTests(unittest.TestCase):
         forced_b = _forced("B", make(b), 1, CTX, self.cfg)
         self.assertLess(forced_b.score, forced_a.score)
 
+    def test_forced_penalises_chasing_near_the_high(self):
+        # HCL 30-Sep: steady rally 1225 -> 1247, tiny dip, long offered at 1245.
+        rally, p = [], 1225.0
+        for _ in range(20):
+            rally.append((p, p + 1.7, p - 0.5, p + 1.1, 20000))
+            p += 1.1
+        chase = rally + [(1247, 1247.3, 1244.5, 1245, 9000), (1245, 1245.5, 1243, 1243.5, 8000),
+                         (1243.5, 1244.2, 1243, 1244, 8000), (1244, 1245.4, 1243.8, 1245, 9000)]
+        pullback = rally + [(1247, 1247.2, 1244, 1244.5, 9000), (1244.5, 1245, 1241, 1241.5, 8000),
+                            (1241.5, 1242, 1238.5, 1239, 8000), (1239, 1239.5, 1236.5, 1237, 7000),
+                            (1237, 1238.5, 1236.2, 1238, 6000), (1238, 1240, 1237.5, 1239.8, 7000),
+                            (1239.8, 1241.3, 1239.5, 1241, 8000)]
+        self.assertTrue(all(s.tier == 3 for s in evaluate_stock("HCL", make(chase), None, CTX, self.cfg)))
+        chase_score = _forced("HCL", make(chase), 1, CTX, self.cfg).score
+        pullback_score = _forced("HCL", make(pullback), 1, CTX, self.cfg).score
+        self.assertLess(chase_score, pullback_score - 15.0)
+
     def test_forced_always_returns_a_pick_for_healthy_data(self):
         chop = [(100.0, 100.2, 99.8, 100.0 + (0.1 if i % 2 else -0.1), 1000) for i in range(30)]
         data = {"C": StockData("C", tuple(make(chop)), chop[-1][3], None, Health("C", True))}

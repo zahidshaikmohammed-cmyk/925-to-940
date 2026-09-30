@@ -58,6 +58,7 @@ from strategy_930 import (
 
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
+BIAS_NAMES = {1: "UP", -1: "DOWN", 0: "MIXED"}
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,14 @@ class OldConfig:
     t1_max_impulse_a5: float = 5.0
     t1_max_retrace_age: float = 1.5   # pullback bars <= 1.5 x impulse bars
     t1_min_breadth_align: float = 0.35
+
+    # Market direction. UP when most liquid stocks are above VWAP and the
+    # median stock is green since the open; DOWN is the mirror; else MIXED.
+    # A+/B never trade against an UP/DOWN market; forced picks are heavily
+    # penalised for it.
+    bias_up_breadth: float = 0.60
+    bias_down_breadth: float = 0.40
+    counter_market_penalty: float = 35.0
 
     # Tier 2 (B)
     t2_depth: tuple[float, float] = (0.30, 0.78)
@@ -115,6 +124,14 @@ class Context:
     sector_return: float | None          # median since-open return of sector peers
     breadth: float                       # fraction of liquid stocks above VWAP
     gap_z: float = 0.0
+
+    def bias(self, cfg: "OldConfig") -> int:
+        """+1 market UP, -1 market DOWN, 0 MIXED."""
+        if self.breadth >= cfg.bias_up_breadth and self.market_return > 0:
+            return 1
+        if self.breadth <= cfg.bias_down_breadth and self.market_return < 0:
+            return -1
+        return 0
 
 
 @dataclass(frozen=True)
@@ -313,6 +330,10 @@ def _setup(symbol: str, cs: list[Candle], side: int, tier: int, gap: float | Non
         max_vol, min_eff, min_pers = cfg.t2_max_vol_ratio, cfg.t2_min_efficiency, cfg.t2_min_persistence
         max_ext, max_imp, max_age = cfg.t2_max_vwap_ext_a5, cfg.t2_max_impulse_a5, cfg.t2_max_retrace_age
 
+    if ctx.bias(cfg) == -side:                      # never against the market
+        return None
+    if side * (entry - cs[0].open) <= 0:            # never against the stock's own day
+        return None
     if gap is not None and (abs(gap) > cfg.max_gap_pct or abs(ctx.gap_z) > cfg.max_gap_z):
         return None
     if impulse_pct < cfg.min_impulse_pct or impulse_a5 > max_imp:
@@ -365,6 +386,7 @@ def _setup(symbol: str, cs: list[Candle], side: int, tier: int, gap: float | Non
 
     reasons = (
         "A+_SETUP" if tier == 1 else "B_SETUP",
+        f"market={BIAS_NAMES[ctx.bias(cfg)]}",
         f"depth={leg.depth:.3f}",
         f"reclaim={leg.reclaim:.3f}",
         f"impulse_bars={leg.impulse_bars}",
@@ -412,7 +434,9 @@ def _forced(symbol: str, cs: list[Candle], side: int, ctx: Context, cfg: OldConf
     # Buying near the high / selling near the low: full penalty at the
     # extreme, fading out once price has pulled back 1 ATR5 from it.
     penalty += 25.0 * (1.0 - scale(room, 0.3, 1.0))
-    penalty += 10.0 * scale(-trend, 0.0, 2.0)     # against the day's direction
+    penalty += 25.0 * scale(-trend, 0.0, 1.0)     # against the stock's own day
+    if ctx.bias(cfg) == -side:                     # against the whole market
+        penalty += cfg.counter_market_penalty
 
     w_sector = 0.05 if srs is not None else 0.0
     parts = (
@@ -446,6 +470,7 @@ def _forced(symbol: str, cs: list[Candle], side: int, ctx: Context, cfg: OldConf
     reasons = (
         "FORCED_BEST_AVAILABLE",
         "NO_STOCK_PASSED_A+_OR_B",
+        f"market={BIAS_NAMES[ctx.bias(cfg)]}",
         f"trend={trend:+.2f}ATR5",
         f"room_to_extreme={room:.2f}ATR5",
         f"penalty={penalty:.1f}",
@@ -870,7 +895,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S} IST")
     print(f"UNIVERSE     : {len(parsed)}/{EXPECTED_UNIVERSE} received | healthy {len(healthy)} | liquid top {stats.get('liquid', 0)}")
     if stats:
-        print(f"MARKET       : median since-open {stats['market_return']:+.3f}% | breadth above VWAP {stats['breadth'] * 100:.0f}%")
+        bias = Context(stats["market_return"], None, stats["breadth"]).bias(cfg)
+        allowed = {1: "LONGS ONLY", -1: "SHORTS ONLY", 0: "both directions"}[bias]
+        print(f"MARKET       : {BIAS_NAMES[bias]} -> {allowed} | median since-open {stats['market_return']:+.3f}% | "
+              f"breadth above VWAP {stats['breadth'] * 100:.0f}%")
     counts = {t: len({s.symbol for s in signals if s.tier == t}) for t in (1, 2, 3)}
     print(f"STOCKS       : A+={counts[1]} | B={counts[2]} | forced-only={counts[3]}")
 

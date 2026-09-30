@@ -115,6 +115,35 @@ class OldEngineTests(unittest.TestCase):
         pullback_score = _forced("HCL", make(pullback), 1, CTX, self.cfg).score
         self.assertLess(chase_score, pullback_score - 15.0)
 
+    def test_market_bias(self):
+        self.assertEqual(Context(0.3, None, 0.70).bias(self.cfg), 1)
+        self.assertEqual(Context(-0.3, None, 0.30).bias(self.cfg), -1)
+        self.assertEqual(Context(0.3, None, 0.50).bias(self.cfg), 0)
+        self.assertEqual(Context(-0.1, None, 0.65).bias(self.cfg), 0)   # breadth and median disagree
+
+    def test_no_short_setup_in_an_up_market(self):
+        short_rows = make(mirror(CLEAN_LONG))
+        up = Context(0.4, None, 0.70)
+        self.assertTrue(all(s.tier == 3 for s in evaluate_stock("M", short_rows, None, up, self.cfg)))
+        mixed = Context(0.1, None, 0.50)
+        self.assertEqual(evaluate_stock("M", short_rows, None, mixed, self.cfg)[0].tier, 1)
+
+    def test_forced_counter_market_pick_is_penalised(self):
+        short_rows = make(mirror(CLEAN_LONG))
+        up = _forced("M", short_rows, -1, Context(0.4, None, 0.70), self.cfg)
+        mixed = _forced("M", short_rows, -1, Context(0.1, None, 0.50), self.cfg)
+        self.assertAlmostEqual(mixed.score - up.score, self.cfg.counter_market_penalty, delta=8.0)
+
+    def test_up_market_universe_never_picks_a_short(self):
+        trend = [(100 + i * 0.1, 100.15 + i * 0.1, 99.95 + i * 0.1, 100.1 + i * 0.1, 1000) for i in range(16)]
+        data = {f"U{i}": StockData(f"U{i}", tuple(make(trend)), trend[-1][3], None, Health(f"U{i}", True))
+                for i in range(8)}
+        short_rows = mirror(CLEAN_LONG)
+        data["SHORTY"] = StockData("SHORTY", tuple(make(short_rows)), short_rows[-1][3], None, Health("SHORTY", True))
+        signals, stats = scan(data, {}, self.cfg)
+        self.assertEqual(Context(stats["market_return"], None, stats["breadth"]).bias(self.cfg), 1)
+        self.assertEqual(rank_signals(signals)[0].side, "LONG")
+
     def test_forced_always_returns_a_pick_for_healthy_data(self):
         chop = [(100.0, 100.2, 99.8, 100.0 + (0.1 if i % 2 else -0.1), 1000) for i in range(30)]
         data = {"C": StockData("C", tuple(make(chop)), chop[-1][3], None, Health("C", True))}

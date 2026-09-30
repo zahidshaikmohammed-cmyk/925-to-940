@@ -16,15 +16,22 @@ Stops and targets are structural:
     TP2  = measured move (pullback extreme + full impulse length, AB=CD)
 
 Usage:
-    python old.py              one live scan, prints the #1 and runners-up
+    python old.py              scan, print the #1, then manage the trade live
+    python old.py --no-manage  scan and print the #1 only
+    python old.py --resume     keep managing the trade saved in active_trade.json
     python old.py --self-test  offline tests only
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import json
+import time as systime
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from math import sqrt
+from pathlib import Path
 from statistics import median
 
 from psygrid_client import EXPECTED_UNIVERSE, PsygridClient, StockData
@@ -96,7 +103,10 @@ class OldConfig:
     min_tp1_r: float = 0.5            # rejects entries glued to the extreme
     min_tp2_r: float = 1.8
     time_stop_minutes: int = 20
+    time_stop_min_r: float = 0.5
+    max_hold_minutes: int = 60
     square_off: str = "15:15"
+    manager_poll_seconds: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -502,6 +512,266 @@ def rank_signals(signals: list[Signal]) -> list[Signal]:
 
 
 # --------------------------------------------------------------------------
+# Trade manager: watches the #1 minute by minute and says what to do
+# --------------------------------------------------------------------------
+
+TRADE_FILE = Path("active_trade.json")
+
+
+@dataclass
+class Trade:
+    symbol: str
+    side: str
+    entry: float
+    stop: float                 # original stop; defines 1R
+    tp1: float
+    tp2: float
+    opened_at: str              # ISO time the trade was taken
+    last_ts: str                # last 1m candle already processed
+    current_stop: float
+    booked_half: bool = False
+    time_check_done: bool = False
+    trail_level: float | None = None
+    closed: bool = False
+    exit_price: float | None = None
+    exit_reason: str = ""
+    realized_r: float = 0.0
+
+    @property
+    def d(self) -> int:
+        return 1 if self.side == "LONG" else -1
+
+    @property
+    def risk(self) -> float:
+        return abs(self.entry - self.stop)
+
+
+def trade_from_signal(sig: Signal, opened_at: datetime, last_ts: datetime, entry: float | None = None) -> Trade:
+    fill = sig.entry if entry is None else entry
+    return Trade(sig.symbol, sig.side, fill, sig.stop, sig.tp1, sig.tp2,
+                 opened_at.isoformat(), last_ts.isoformat(), sig.stop)
+
+
+def save_trade(tr: Trade, path: Path = TRADE_FILE) -> None:
+    try:
+        path.write_text(json.dumps(asdict(tr), indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[TRADE-WARN] could not save {path}: {exc}")
+
+
+def load_trade(path: Path = TRADE_FILE) -> Trade | None:
+    try:
+        return Trade(**json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def _close(tr: Trade, price: float, reason: str) -> None:
+    share = 0.5 if tr.booked_half else 1.0
+    tr.realized_r += share * tr.d * (price - tr.entry) / tr.risk
+    tr.closed, tr.exit_price, tr.exit_reason = True, price, reason
+
+
+def _book_level(tr: Trade) -> float:
+    """TP1 or +1R, whichever comes first."""
+    dist = tr.d * (tr.tp1 - tr.entry)
+    dist = tr.risk if dist <= 0 else min(dist, tr.risk)
+    return tr.entry + tr.d * dist
+
+
+def manage_step(tr: Trade, candles, cfg: OldConfig) -> list[tuple[str, str, str]]:
+    """Apply the holding rules to every new completed 1m candle.
+
+    Returns (HH:MM, kind, message) events. kind is STATUS, BOOK, TRAIL or EXIT.
+    Within one candle the stop is checked first (worst case), so a candle that
+    touches both the stop and a target is treated as a stop-out.
+    """
+    cs = session_candles(candles)
+    last = datetime.fromisoformat(tr.last_ts)
+    opened = datetime.fromisoformat(tr.opened_at)
+    sq_h, sq_m = (int(x) for x in cfg.square_off.split(":"))
+    d, risk = tr.d, tr.risk
+    events: list[tuple[str, str, str]] = []
+
+    for i, c in enumerate(cs):
+        if tr.closed:
+            break
+        if c.ts <= last:
+            continue
+        tr.last_ts = c.ts.isoformat()
+        stamp = f"{c.ts.astimezone(IST):%H:%M}"
+        done_at = c.ts + timedelta(minutes=1)
+        adverse = c.low if d == 1 else c.high
+        favour = c.high if d == 1 else c.low
+        n_before = len(events)
+
+        if d * (adverse - tr.current_stop) <= 0:
+            kind = "BREAKEVEN STOP" if tr.booked_half else "STOP LOSS HIT"
+            _close(tr, tr.current_stop, kind)
+            events.append((stamp, "EXIT", f"{kind} at Rs {tr.current_stop:.2f}"))
+            break
+        if d * (favour - tr.tp2) >= 0:
+            _close(tr, tr.tp2, "TP2 HIT")
+            events.append((stamp, "EXIT", f"TP2 HIT at Rs {tr.tp2:.2f} -- exit everything"))
+            break
+        if not tr.booked_half and d * (favour - _book_level(tr)) >= 0:
+            level = _book_level(tr)
+            tr.booked_half = True
+            tr.realized_r += 0.5 * d * (level - tr.entry) / risk
+            tr.current_stop = tr.entry
+            events.append((stamp, "BOOK", f"BOOK 50% NOW at Rs {level:.2f} | MOVE SL TO ENTRY Rs {tr.entry:.2f}"))
+
+        if not tr.time_check_done and done_at >= opened + timedelta(minutes=cfg.time_stop_minutes):
+            tr.time_check_done = True
+            if not tr.booked_half and d * (c.close - tr.entry) < cfg.time_stop_min_r * risk:
+                _close(tr, c.close, "TIME STOP")
+                events.append((stamp, "EXIT", f"TIME STOP: not +{cfg.time_stop_min_r}R after "
+                                              f"{cfg.time_stop_minutes} min -- EXIT NOW at ~Rs {c.close:.2f}"))
+                break
+
+        minute = c.ts.astimezone(IST).hour * 60 + c.ts.astimezone(IST).minute - (9 * 60 + 15)
+        if minute % 5 == 4:                        # this candle completed a 5m bar
+            upto = cs[:i + 1]
+            bars = five_minute_bars(upto)
+            vw = vwap(upto)
+            bar = bars[-1]
+            if d * (bar.close - vw) < 0:
+                _close(tr, bar.close, "5M CLOSE WRONG SIDE OF VWAP")
+                events.append((stamp, "EXIT", f"EXIT NOW: 5m candle closed {'below' if d == 1 else 'above'} "
+                                              f"VWAP Rs {vw:.2f} (~Rs {bar.close:.2f})"))
+                break
+            if tr.booked_half and len(bars) >= 2:
+                prev = bars[-2]
+                prev_level = prev.low if d == 1 else prev.high
+                if d * (bar.close - prev_level) < 0:
+                    _close(tr, bar.close, "5M TRAIL BROKEN")
+                    events.append((stamp, "EXIT", f"EXIT NOW: 5m candle closed {'below' if d == 1 else 'above'} "
+                                                  f"previous 5m {'low' if d == 1 else 'high'} Rs {prev_level:.2f}"))
+                    break
+                tr.trail_level = bar.low if d == 1 else bar.high
+                events.append((stamp, "TRAIL", f"TRAIL: exit runner if next 5m candle closes "
+                                               f"{'below' if d == 1 else 'above'} Rs {tr.trail_level:.2f}"))
+
+        if done_at >= opened + timedelta(minutes=cfg.max_hold_minutes):
+            _close(tr, c.close, f"MAX HOLD {cfg.max_hold_minutes} MIN")
+            events.append((stamp, "EXIT", f"MAX HOLD {cfg.max_hold_minutes} MIN reached -- EXIT NOW at ~Rs {c.close:.2f}"))
+            break
+        if done_at.astimezone(IST).time() >= dtime(sq_h, sq_m):
+            _close(tr, c.close, "SQUARE OFF")
+            events.append((stamp, "EXIT", f"SQUARE-OFF TIME -- EXIT NOW at ~Rs {c.close:.2f}"))
+            break
+
+        if len(events) == n_before:
+            open_r = d * (c.close - tr.entry) / risk
+            events.append((stamp, "STATUS", f"close Rs {c.close:.2f} | {open_r:+.2f}R | SL Rs {tr.current_stop:.2f}"
+                                            f"{' | runner' if tr.booked_half else ''} | HOLD"))
+    return events
+
+
+def clock_check(tr: Trade, now: datetime, last_close: float, cfg: OldConfig) -> list[tuple[str, str, str]]:
+    """Wall-clock backup for the time rules when no new candle has arrived
+    (feed stalled). Allows a 2-minute grace for the candle to show up."""
+    if tr.closed:
+        return []
+    opened = datetime.fromisoformat(tr.opened_at)
+    grace = timedelta(minutes=2)
+    sq_h, sq_m = (int(x) for x in cfg.square_off.split(":"))
+    stamp = f"{now.astimezone(IST):%H:%M}"
+    if now >= opened + timedelta(minutes=cfg.max_hold_minutes) + grace:
+        reason = f"MAX HOLD {cfg.max_hold_minutes} MIN"
+    elif now.astimezone(IST).time() >= dtime(sq_h, sq_m + 2 if sq_m < 58 else sq_m):
+        reason = "SQUARE OFF"
+    elif (not tr.booked_half and not tr.time_check_done
+          and now >= opened + timedelta(minutes=cfg.time_stop_minutes) + grace
+          and tr.d * (last_close - tr.entry) < cfg.time_stop_min_r * tr.risk):
+        tr.time_check_done = True
+        reason = "TIME STOP"
+    else:
+        return []
+    _close(tr, last_close, reason + " (FEED STALLED)")
+    return [(stamp, "EXIT", f"{reason}: no fresh candle from the feed -- EXIT NOW at market (last ~Rs {last_close:.2f})")]
+
+
+def beep() -> None:
+    print("\a", end="", flush=True)
+    try:
+        import winsound
+        winsound.Beep(1200, 400)
+    except Exception:
+        pass
+
+
+def run_manager(tr: Trade, client: PsygridClient, cfg: OldConfig, audit: Audit) -> None:
+    print("\n" + "=" * 96)
+    print(f"TRADE MANAGER // {tr.symbol} {tr.side} | entry Rs {tr.entry:.2f} | SL Rs {tr.stop:.2f} | "
+          f"TP1 Rs {tr.tp1:.2f} | TP2 Rs {tr.tp2:.2f}")
+    print(f"Rules: +{cfg.time_stop_min_r}R within {cfg.time_stop_minutes} min or exit | TP1/+1R -> book 50%, SL to entry | "
+          f"trail on 5m closes | 5m close past VWAP -> exit | max {cfg.max_hold_minutes} min")
+    print("Checks every completed 1m candle. Beeps on every action. Ctrl+C stops watching (resume: python old.py --resume)")
+    print("=" * 96, flush=True)
+    save_trade(tr)
+    try:
+        while not tr.closed:
+            now = now_ist()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    raw = client.market()
+                if tr.symbol not in raw:
+                    raise RuntimeError(f"{tr.symbol} missing from feed")
+                data = client.stock(tr.symbol, raw[tr.symbol], now)
+                events = manage_step(tr, data.candles, cfg)
+                if data.candles:
+                    events += clock_check(tr, now, data.candles[-1].close, cfg)
+            except Exception as exc:
+                print(f"[{now:%H:%M:%S}] feed warning: {exc} -- retrying", flush=True)
+                events = []
+            for stamp, kind, msg in events:
+                if kind == "STATUS":
+                    print(f"[{stamp}] {msg}", flush=True)
+                else:
+                    beep()
+                    print(f"\n[{stamp}] >>> {kind}: {msg}\n", flush=True)
+            save_trade(tr)
+            if tr.closed:
+                break
+            if now.time() >= MARKET_CLOSE:
+                print("Market closed while the trade was open -- square it off manually.")
+                break
+            systime.sleep(cfg.manager_poll_seconds)
+    except KeyboardInterrupt:
+        print("\nStopped watching. The trade is saved; resume with: python old.py --resume")
+        return
+    if tr.closed:
+        print("-" * 96)
+        print(f"TRADE CLOSED : {tr.exit_reason} | result {tr.realized_r:+.2f}R")
+        print("-" * 96)
+        audit.event("OLD_TRADE_CLOSED", **asdict(tr))
+
+
+def ask_fill(sig: Signal) -> float | None:
+    """Ask whether the trade was taken; returns the fill price or None."""
+    try:
+        ans = input(f"\nDid you take {sig.symbol} {sig.side}? [Enter] = manage at Rs {sig.entry:.2f} | "
+                    f"type your fill price | n = skip: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if ans in ("n", "no", "skip"):
+        return None
+    if not ans:
+        return sig.entry
+    try:
+        fill = float(ans)
+    except ValueError:
+        print("Not a number -- skipping the trade manager.")
+        return None
+    d = 1 if sig.side == "LONG" else -1
+    if d * (fill - sig.stop) <= 0:
+        print("That fill is already beyond the stop loss -- skipping the trade manager.")
+        return None
+    return fill
+
+
+# --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------
 
@@ -555,15 +825,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="old.py structural opening-drive engine")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--base-url", default=BASE_URL)
+    parser.add_argument("--no-manage", action="store_true", help="print the #1 and exit")
+    parser.add_argument("--resume", action="store_true", help="resume managing active_trade.json")
     args = parser.parse_args(argv)
 
     if args.self_test:
         import unittest
-        suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_old")
+        suite = unittest.defaultTestLoader.loadTestsFromNames(["tests.test_old", "tests.test_old_manager"])
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 10
 
     cfg = OldConfig()
     audit = Audit()
+    if args.resume:
+        tr = load_trade()
+        if tr is None or tr.closed:
+            print("No open trade saved in active_trade.json.")
+            return 40
+        run_manager(tr, PsygridClient(args.base_url), cfg, audit)
+        return 0
     print("=" * 96)
     print("OLD.PY // STRUCTURAL OPENING-DRIVE PULLBACK ENGINE | A+ -> B -> FORCED | ALWAYS ONE #1")
     print("=" * 96)
@@ -607,6 +886,17 @@ def main(argv: list[str] | None = None) -> int:
     print("\nNOTE: deterministic research signal; not a guarantee of profit.")
     audit.event("OLD_SIGNAL", scan_time=scan_time.isoformat(), window=time_window(scan_time.time())[0],
                 counts=counts, selected=asdict(best))
+
+    if args.no_manage:
+        return 0
+    if time_window(scan_time.time())[1] == 0:
+        print("No new entries this late -- trade manager not started.")
+        return 0
+    fill = ask_fill(best)
+    if fill is None:
+        return 0
+    last_ts = parsed[best.symbol].candles[-1].ts
+    run_manager(trade_from_signal(best, now_ist(), last_ts, fill), client, cfg, audit)
     return 0
 
 

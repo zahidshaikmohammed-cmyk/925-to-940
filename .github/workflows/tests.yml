@@ -20,5 +20,5 @@ jobs:
       - run: python -m compileall -q config.py strategy_930.py psygrid_client.py run_engine.py bbbbb.py tests/test_strategy_930.py tests/test_run_engine.py
       - run: python -m unittest tests.test_strategy_930 tests.test_run_engine -v
       - run: python bbbbb.py --self-test
-      - run: python -m compileall -q old.py tests/test_old.py
+      - run: python -m compileall -q old.py tests/test_old.py tests/test_old_manager.py
       - run: python old.py --self-test

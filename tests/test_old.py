@@ -1,0 +1,122 @@
+import unittest
+from datetime import datetime, time as dtime, timedelta
+
+from old import (
+    Context,
+    _forced,
+    OldConfig,
+    evaluate_stock,
+    rank_signals,
+    scan,
+    structural_leg,
+    time_window,
+)
+from psygrid_client import Health, StockData
+from strategy_930 import IST, Candle
+
+
+def make(rows, start=(9, 15)):
+    t0 = datetime(2026, 9, 30, start[0], start[1], tzinfo=IST)
+    return [Candle(t0 + timedelta(minutes=i), o, h, l, c, v) for i, (o, h, l, c, v) in enumerate(rows)]
+
+
+# 09:15 opening drive 100 -> 102.1, light-volume pullback to 101.0 (50%),
+# bullish reclaim to 101.6 with room left to the high.
+CLEAN_LONG = [
+    (100.0, 100.35, 99.9, 100.3, 3000), (100.3, 100.65, 100.2, 100.6, 2800),
+    (100.6, 100.95, 100.5, 100.9, 2700), (100.9, 101.25, 100.8, 101.2, 2600),
+    (101.2, 101.55, 101.1, 101.5, 2500), (101.5, 101.85, 101.4, 101.8, 2400),
+    (101.8, 102.1, 101.7, 102.0, 2300), (102.0, 102.05, 101.75, 101.8, 900),
+    (101.8, 101.85, 101.5, 101.55, 900), (101.55, 101.6, 101.25, 101.3, 800),
+    (101.3, 101.35, 101.0, 101.1, 800), (101.1, 101.3, 101.02, 101.25, 900),
+    (101.25, 101.45, 101.2, 101.4, 1000), (101.4, 101.62, 101.35, 101.6, 1200),
+]
+
+CTX = Context(market_return=0.1, sector_return=None, breadth=0.55)
+
+
+def mirror(rows, pivot=200.0):
+    """Reflect a LONG fixture into the equivalent SHORT fixture."""
+    return [(pivot - o, pivot - l, pivot - h, pivot - c, v) for o, h, l, c, v in rows]
+
+
+class OldEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = OldConfig()
+
+    def test_clean_opening_drive_is_a_plus_with_structural_targets(self):
+        sigs = evaluate_stock("CLEAN", make(CLEAN_LONG), None, CTX, self.cfg)
+        self.assertEqual(len(sigs), 1)
+        s = sigs[0]
+        self.assertEqual((s.tier, s.side), (1, "LONG"))
+        self.assertAlmostEqual(s.tp1, 102.1)                 # retest of the high
+        self.assertAlmostEqual(s.tp2, 101.0 + (102.1 - 99.9))  # AB=CD measured move
+        self.assertLess(s.stop, 101.0)                       # below the pullback low
+        self.assertGreaterEqual(s.tp1_r, self.cfg.min_tp1_r)
+
+    def test_short_mirror_is_a_plus(self):
+        sigs = evaluate_stock("MIRROR", make(mirror(CLEAN_LONG)), None, Context(-0.1, None, 0.45), self.cfg)
+        self.assertEqual((sigs[0].tier, sigs[0].side), (1, "SHORT"))
+
+    def test_entry_glued_to_extreme_is_not_a_setup(self):
+        rows = CLEAN_LONG[:-1] + [(101.4, 102.05, 101.35, 102.0, 1200)]  # reclaim ~0.9
+        sigs = evaluate_stock("GLUED", make(rows), None, CTX, self.cfg)
+        self.assertTrue(all(s.tier == 3 for s in sigs))
+
+    def test_price_past_the_extreme_is_not_a_setup(self):
+        # JUBLPHARMA 30-Sep pattern: drop, bounce, then a fresh low far below VWAP.
+        rows = [(1045.0 - i * 0.8, 1045.3 - i * 0.8, 1044.0 - i * 0.8, 1044.2 - i * 0.8, 2000) for i in range(10)]
+        rows += [(1037.2, 1038.5, 1037.0, 1038.3, 800), (1038.3, 1040.0, 1038.2, 1039.6, 700),
+                 (1039.6, 1039.7, 1037.5, 1037.8, 1500), (1037.8, 1037.9, 1035.3, 1035.4, 2500)]
+        sigs = evaluate_stock("JUBL", make(rows), None, CTX, self.cfg)
+        self.assertTrue(sigs)
+        self.assertTrue(all(s.tier == 3 for s in sigs))
+
+    def test_large_gap_blocks_setup(self):
+        sigs = evaluate_stock("GAP", make(CLEAN_LONG), 95.0, CTX, self.cfg)  # +5.3% gap
+        self.assertTrue(all(s.tier == 3 for s in sigs))
+
+    def test_forced_prefers_pullback_near_vwap_over_stretched_chase(self):
+        chop = [(100.0 + (0.05 if i % 2 else -0.05), 100.2, 99.8, 100.0 + (0.05 if i % 2 else -0.05), 1000) for i in range(20)]
+        # A: steady uptrend that pulled back near VWAP.  B: vertical spike, closing at the high.
+        a = [(100 + i * 0.1, 100.15 + i * 0.1, 99.95 + i * 0.1, 100.1 + i * 0.1, 1000) for i in range(14)]
+        a += [(101.4, 101.45, 101.0, 101.05, 600), (101.05, 101.1, 100.9, 101.0, 600),
+              (101.0, 101.15, 100.95, 101.1, 700), (101.1, 101.2, 101.05, 101.15, 700)]
+        b = [(100.0, 100.1, 99.95, 100.0, 1000)] * 14
+        b += [(100.0, 101.0, 100.0, 101.0, 5000), (101.0, 102.0, 101.0, 102.0, 5000),
+              (102.0, 103.0, 102.0, 103.0, 5000), (103.0, 104.0, 103.0, 104.0, 5000)]
+        data = {
+            name: StockData(name, tuple(make(rows)), rows[-1][3], None, Health(name, True))
+            for name, rows in (("A", a), ("B", b), ("C", chop), ("D", chop), ("E", chop))
+        }
+        signals, _ = scan(data, {}, self.cfg)
+        best = rank_signals(signals)[0]
+        self.assertEqual((best.symbol, best.side), ("A", "LONG"))
+        spike = [s for s in signals if s.symbol == "B" and s.side == "LONG"][0]
+        self.assertEqual(spike.tier, 3)
+        forced_a = _forced("A", make(a), 1, CTX, self.cfg)
+        forced_b = _forced("B", make(b), 1, CTX, self.cfg)
+        self.assertLess(forced_b.score, forced_a.score)
+
+    def test_forced_always_returns_a_pick_for_healthy_data(self):
+        chop = [(100.0, 100.2, 99.8, 100.0 + (0.1 if i % 2 else -0.1), 1000) for i in range(30)]
+        data = {"C": StockData("C", tuple(make(chop)), chop[-1][3], None, Health("C", True))}
+        signals, _ = scan(data, {}, self.cfg)
+        self.assertTrue(rank_signals(signals))
+
+    def test_structural_leg_uses_session_extreme(self):
+        leg = structural_leg(make(CLEAN_LONG), 1, self.cfg)
+        self.assertEqual((leg.start, leg.extreme, leg.pullback), (99.9, 102.1, 101.0))
+        self.assertLessEqual(leg.reclaim, 1.0)
+
+    def test_time_windows(self):
+        self.assertEqual(time_window(dtime(9, 20))[0], "TOO EARLY")
+        self.assertEqual(time_window(dtime(9, 32))[0], "PRIME")
+        self.assertEqual(time_window(dtime(10, 0))[0], "GOOD")
+        self.assertEqual(time_window(dtime(12, 30))[0], "MIDDAY CHOP")
+        self.assertEqual(time_window(dtime(15, 5)), ("NO NEW ENTRIES", 0, time_window(dtime(15, 5))[2]))
+        self.assertEqual(time_window(dtime(15, 45))[0], "CLOSED")
+
+
+if __name__ == "__main__":
+    unittest.main()

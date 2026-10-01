@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 engine_audit.jsonl
 active_trade.json
+snapshots/

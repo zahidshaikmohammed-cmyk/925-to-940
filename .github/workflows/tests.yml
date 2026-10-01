@@ -26,3 +26,5 @@ jobs:
       - run: python index.py --self-test
       - run: python -m compileall -q opt.py tests/test_opt.py
       - run: python opt.py --self-test
+      - run: python -m compileall -q bbbbb_plus.py tests/test_bbbbb_plus.py
+      - run: python bbbbb_plus.py --self-test

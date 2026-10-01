@@ -3,3 +3,5 @@ __pycache__/
 engine_audit.jsonl
 active_trade.json
 snapshots/
+index_levels.json
+index_state.json

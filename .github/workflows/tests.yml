@@ -22,3 +22,5 @@ jobs:
       - run: python bbbbb.py --self-test
       - run: python -m compileall -q old.py tests/test_old.py tests/test_old_manager.py
       - run: python old.py --self-test
+      - run: python -m compileall -q index.py tests/test_index.py
+      - run: python index.py --self-test

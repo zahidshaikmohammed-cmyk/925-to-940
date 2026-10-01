@@ -117,3 +117,46 @@ class TradeManagerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManualTradeTests(unittest.TestCase):
+    def _client(self, candles):
+        class Fake:
+            def market(self):
+                return {"GRAPHITE": {}}
+
+            def stock(self, symbol, payload, now):
+                from psygrid_client import Health, StockData
+                return StockData(symbol, tuple(candles), candles[-1].close, None, Health(symbol, True))
+        return Fake()
+
+    def test_manual_trade_replays_from_entry_minute(self):
+        import old
+        now = datetime(2026, 9, 30, 9, 40, 5, tzinfo=IST)
+        original = old.now_ist
+        old.now_ist = lambda: now
+        try:
+            tr = old.manual_trade(["graphite", "long", "101.6", "100.79", "102.1", "103.2"], "09:22",
+                                  self._client(BASE))
+        finally:
+            old.now_ist = original
+        self.assertEqual((tr.symbol, tr.side, tr.entry), ("GRAPHITE", "LONG", 101.6))
+        self.assertEqual(datetime.fromisoformat(tr.last_ts).astimezone(IST).strftime("%H:%M"), "09:21")
+
+    def test_manual_trade_rejects_levels_against_direction(self):
+        import old
+        self.assertIsNone(old.manual_trade(["X", "LONG", "100", "101", "102", "103"], None, self._client(BASE)))
+
+    def test_fill_price_parsing_accepts_text(self):
+        import builtins
+        import old
+        from tests.test_old import CTX
+        sig = old.evaluate_stock("CLEAN", BASE, None, CTX, OldConfig())[0]
+        original = builtins.input
+        try:
+            builtins.input = lambda prompt: "manage at 101.5"
+            self.assertEqual(old.ask_fill(sig), 101.5)
+            builtins.input = lambda prompt: "n"
+            self.assertIsNone(old.ask_fill(sig))
+        finally:
+            builtins.input = original

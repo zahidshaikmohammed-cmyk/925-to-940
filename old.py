@@ -27,6 +27,7 @@ import argparse
 import contextlib
 import io
 import json
+import re
 import time as systime
 from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime, timedelta
@@ -775,22 +776,67 @@ def run_manager(tr: Trade, client: PsygridClient, cfg: OldConfig, audit: Audit) 
         audit.event("OLD_TRADE_CLOSED", **asdict(tr))
 
 
+def manual_trade(spec: list[str], opened: str | None, client: PsygridClient) -> Trade | None:
+    """Build a Trade from --manage SYMBOL SIDE ENTRY STOP TP1 TP2 [--opened HH:MM].
+
+    Candles from the entry minute onwards are replayed, so a stop or target
+    already touched since entry is reported straight away."""
+    symbol, side = spec[0].upper(), spec[1].upper()
+    try:
+        entry, stop, tp1, tp2 = (float(x) for x in spec[2:])
+    except ValueError:
+        print("ENTRY STOP TP1 TP2 must be numbers.")
+        return None
+    if side not in ("LONG", "SHORT"):
+        print("SIDE must be LONG or SHORT.")
+        return None
+    d = 1 if side == "LONG" else -1
+    if d * (entry - stop) <= 0 or d * (tp1 - entry) <= 0 or d * (tp2 - entry) <= 0:
+        print("Levels don't fit the direction (LONG needs STOP < ENTRY < TP1/TP2; SHORT the reverse).")
+        return None
+    now = now_ist()
+    opened_at = now
+    if opened:
+        try:
+            h, m = (int(x) for x in opened.split(":"))
+            opened_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        except ValueError:
+            print("--opened must look like 09:36")
+            return None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            raw = client.market()
+        candles = client.stock(symbol, raw[symbol], now).candles
+    except Exception as exc:
+        print(f"Could not load {symbol} from the feed: {exc}")
+        return None
+    before = [c for c in candles if c.ts < opened_at.replace(second=0, microsecond=0)]
+    if before:
+        last_ts = before[-1].ts
+    elif candles:
+        last_ts = candles[0].ts - timedelta(minutes=1)
+    else:
+        print(f"No candles for {symbol} yet.")
+        return None
+    return Trade(symbol, side, entry, stop, tp1, tp2, opened_at.isoformat(), last_ts.isoformat(), stop)
+
+
 def ask_fill(sig: Signal) -> float | None:
     """Ask whether the trade was taken; returns the fill price or None."""
     try:
         ans = input(f"\nDid you take {sig.symbol} {sig.side}? [Enter] = manage at Rs {sig.entry:.2f} | "
-                    f"type your fill price | n = skip: ").strip().lower()
+                    f"type ONLY your fill price (e.g. 768) | n = skip: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return None
     if ans in ("n", "no", "skip"):
         return None
     if not ans:
         return sig.entry
-    try:
-        fill = float(ans)
-    except ValueError:
-        print("Not a number -- skipping the trade manager.")
+    match = re.search(r"\d+(?:\.\d+)?", ans)
+    if not match:
+        print("No price found -- skipping the trade manager.")
         return None
+    fill = float(match.group())
     d = 1 if sig.side == "LONG" else -1
     if d * (fill - sig.stop) <= 0:
         print("That fill is already beyond the stop loss -- skipping the trade manager.")
@@ -854,6 +900,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--no-manage", action="store_true", help="print the #1 and exit")
     parser.add_argument("--resume", action="store_true", help="resume managing active_trade.json")
+    parser.add_argument("--manage", nargs=6, metavar=("SYMBOL", "SIDE", "ENTRY", "STOP", "TP1", "TP2"),
+                        help="manage a trade you already took, e.g. --manage GRAPHITE LONG 768 764.31 776 784.95")
+    parser.add_argument("--opened", metavar="HH:MM", help="with --manage: time you entered (default: now)")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -863,6 +912,12 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = OldConfig()
     audit = Audit()
+    if args.manage:
+        tr = manual_trade(args.manage, args.opened, PsygridClient(args.base_url))
+        if tr is None:
+            return 41
+        run_manager(tr, PsygridClient(args.base_url), cfg, audit)
+        return 0
     if args.resume:
         tr = load_trade()
         if tr is None or tr.closed:

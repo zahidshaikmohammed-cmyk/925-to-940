@@ -222,24 +222,87 @@ def price_levels(cs: list[Candle], prev: dict | None, spec: IndexSpec, cfg: Inde
     return out
 
 
+def _num(x) -> float:
+    try:
+        return float(x or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _mid(o: dict) -> float:
+    bid, ask = _num(o.get("top_bid_price")), _num(o.get("top_ask_price"))
+    return (bid + ask) / 2.0 if bid > 0 and ask >= bid else _num(o.get("last_price"))
+
+
+def max_pain(chain: dict) -> float | None:
+    """Strike where option writers pay out the least at expiry."""
+    rows = [(float(s["strike"]), _num((s.get("ce") or {}).get("oi")), _num((s.get("pe") or {}).get("oi")))
+            for s in chain.get("strikes", []) if isinstance(s, dict) and "strike" in s]
+    if not rows or not any(c or p for _, c, p in rows):
+        return None
+    def payout(k: float) -> float:
+        return sum(c * max(0.0, k - x) + p * max(0.0, x - k) for x, c, p in rows)
+    return min((x for x, _, _ in rows), key=payout)
+
+
 def oi_levels(chain: dict, spot: float, cfg: IndexConfig) -> list[Level]:
+    """Every major level the option chain offers.
+
+    CALL / PUT WALL   strikes holding >= 50% of the biggest call (above spot) or
+                      put (below spot) open interest. The biggest wall on each
+                      side is a key level on its own (weight 4).
+    FRESH CALL/PUT    strike with the largest OI ADDED today on each side --
+                      where writers are defending right now.
+    PIVOT             strike near spot with heavy OI on BOTH calls and puts
+                      (straddle writing) -- price tends to gravitate to it.
+    MAX PAIN          strike where writers pay least at expiry.
+    EXPIRY RANGE      spot +/- ATM straddle price: the move priced in to expiry.
+    """
     rows = [
         s for s in chain.get("strikes", [])
-        if isinstance(s, dict) and abs(float(s["strike"]) - spot) / spot * 100.0 <= cfg.oi_max_distance_pct
+        if isinstance(s, dict) and "strike" in s
+        and abs(float(s["strike"]) - spot) / spot * 100.0 <= cfg.oi_max_distance_pct
     ]
     out: list[Level] = []
-    for side, key, label in ((1, "ce", "CALL WALL"), (-1, "pe", "PUT WALL")):
-        pool = [s for s in rows if (s["strike"] >= spot if side == 1 else s["strike"] <= spot)]
-        pool = [s for s in pool if (s.get(key) or {}).get("oi", 0) > 0]
+    for side, key, label, fresh_label in ((1, "ce", "CALL WALL", "FRESH CALL WRITING"),
+                                          (-1, "pe", "PUT WALL", "FRESH PUT WRITING")):
+        pool = [s for s in rows if (s["strike"] >= spot if side == 1 else s["strike"] <= spot)
+                and _num((s.get(key) or {}).get("oi")) > 0]
         if not pool:
             continue
-        top = sorted(pool, key=lambda s: -s[key]["oi"])[:cfg.oi_walls_per_side]
-        biggest = top[0][key]["oi"]
-        for s in top:
-            oi = s[key]["oi"]
-            change = oi - (s[key].get("previous_oi") or 0)
+        biggest = max(_num(s[key]["oi"]) for s in pool)
+        walls = sorted((s for s in pool if _num(s[key]["oi"]) >= 0.5 * biggest),
+                       key=lambda s: -_num(s[key]["oi"]))[:cfg.oi_walls_per_side]
+        for s in walls:
+            oi = _num(s[key]["oi"])
+            change = oi - _num(s[key].get("previous_oi"))
             out.append(Level(float(s["strike"]), f"{label} {oi / 1e6:.1f}M ({change / 1e6:+.1f}M)",
-                             1.0 + 2.0 * oi / biggest))
+                             2.0 + 2.0 * oi / biggest))
+        changes = [(_num(s[key]["oi"]) - _num(s[key].get("previous_oi")), s) for s in pool]
+        top_add, top_row = max(changes, key=lambda x: x[0])
+        if top_add > 0 and top_row not in walls:
+            out.append(Level(float(top_row["strike"]), f"{fresh_label} {top_add / 1e6:+.1f}M", 2.5))
+
+    # Pivot: heavy OI on both sides of one strike close to spot.
+    near = [s for s in rows if abs(float(s["strike"]) - spot) / spot * 100.0 <= 1.0]
+    if near:
+        max_ce = max(_num((s.get("ce") or {}).get("oi")) for s in rows) or 1.0
+        max_pe = max(_num((s.get("pe") or {}).get("oi")) for s in rows) or 1.0
+        both = max(near, key=lambda s: min(_num(s["ce"]["oi"]) / max_ce, _num(s["pe"]["oi"]) / max_pe))
+        share = min(_num(both["ce"]["oi"]) / max_ce, _num(both["pe"]["oi"]) / max_pe)
+        if share >= 0.4:
+            out.append(Level(float(both["strike"]), f"PIVOT (CE+PE OI {share:.0%} of max)", 2.0))
+
+    pain = max_pain(chain)
+    if pain is not None and abs(pain - spot) / spot * 100.0 <= cfg.oi_max_distance_pct:
+        out.append(Level(pain, "MAX PAIN", 2.0))
+
+    atm = min(chain.get("strikes", []), key=lambda s: abs(float(s["strike"]) - spot), default=None)
+    if atm:
+        straddle = _mid(atm.get("ce") or {}) + _mid(atm.get("pe") or {})
+        if straddle > 0:
+            out.append(Level(spot + straddle, f"EXPIRY RANGE HIGH (straddle {straddle:.0f})", 1.5))
+            out.append(Level(spot - straddle, f"EXPIRY RANGE LOW (straddle {straddle:.0f})", 1.5))
     return out
 
 

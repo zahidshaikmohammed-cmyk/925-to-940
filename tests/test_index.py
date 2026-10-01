@@ -16,6 +16,7 @@ from index import (
     completed_five_minute,
     find_signals,
     key_zones,
+    max_pain,
     missing_minutes,
     oi_levels,
     pick_option,
@@ -64,6 +65,31 @@ class LevelTests(unittest.TestCase):
         self.assertEqual(puts[0].price, 22000.0)
         self.assertTrue(all(lv.price >= 22620 for lv in calls))
         self.assertTrue(all(lv.price <= 22620 for lv in puts))
+
+    def test_biggest_wall_is_key_on_its_own(self):
+        chain = json.loads(Path(__file__).with_name("fixtures").joinpath("nifty_chain_small.json").read_text())
+        walls = [lv for lv in oi_levels(chain, 22620.0, self.cfg) if lv.label.startswith(("CALL WALL", "PUT WALL"))]
+        self.assertEqual(max(lv.weight for lv in walls), 4.0)
+        self.assertGreaterEqual(4.0, self.cfg.key_zone_strength)
+
+    def test_max_pain_matches_server(self):
+        chain = json.loads(Path(__file__).with_name("fixtures").joinpath("nifty_chain_small.json").read_text())
+        self.assertEqual(max_pain(chain), 22700.0)      # PsyGrid's own analytics say 22700 too
+
+    def test_chain_extras(self):
+        chain = json.loads(Path(__file__).with_name("fixtures").joinpath("nifty_chain_small.json").read_text())
+        labels = [lv.label for lv in oi_levels(chain, 22620.0, self.cfg)]
+        self.assertTrue(any(l.startswith("PIVOT") for l in labels))
+        self.assertIn("MAX PAIN", labels)
+        self.assertTrue(any(l.startswith("EXPIRY RANGE HIGH") for l in labels))
+        self.assertTrue(any(l.startswith("EXPIRY RANGE LOW") for l in labels))
+
+    def test_fresh_writing_level(self):
+        mk = lambda k, ce, ce_prev, pe, pe_prev: {"strike": k, "ce": {"oi": ce, "previous_oi": ce_prev},
+                                                  "pe": {"oi": pe, "previous_oi": pe_prev}}
+        chain = {"strikes": [mk(100.0, 10, 10, 10, 10), mk(101.0, 100, 100, 1, 1), mk(102.0, 40, 5, 1, 1)]}
+        labels = [lv.label for lv in oi_levels(chain, 100.0, self.cfg)]
+        self.assertIn("FRESH CALL WRITING +35.0M"[:18], " ".join(labels))
 
     def test_previous_day_store(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -229,8 +229,31 @@ def scan_index(index: str, client: PsygridClient, cfg: IndexConfig, bias: int,
     spot = cs[-1].close
     zones = build_zones(price_levels(cs, prev, spec, cfg, opening_complete) + oi_levels(chain, spot, cfg), spot, cfg)
     keys = key_zones(zones, cfg)
+    LEVEL_MAPS[index] = (spot, keys)
     trades = [t for side in (1, -1) if (t := forced_trade(index, cs, keys, bias, chain, side, cfg, now))]
     return trades, f"{index}: spot {spot:,.2f} | {len(keys)} key zones"
+
+
+LEVEL_MAPS: dict[str, tuple[float, list[Zone]]] = {}
+
+
+def print_level_map(index: str, rows: int = 4) -> None:
+    if index not in LEVEL_MAPS:
+        return
+    spot, keys = LEVEL_MAPS[index]
+    above = sorted((z for z in keys if z.low > spot), key=lambda z: z.low)[:rows]
+    below = sorted((z for z in keys if z.high < spot), key=lambda z: -z.high)[:rows]
+    at = [z for z in keys if z.low <= spot <= z.high]
+    print(f"\n{index} KEY LEVELS (nearest {rows} each side):")
+    for z in reversed(above):
+        print(f"  RESISTANCE  {z.describe()}")
+    for z in at:
+        print(f"  PRICE AT    {z.describe()}")
+    print(f"  ---- spot {spot:,.2f} ----")
+    for z in below:
+        print(f"  SUPPORT     {z.describe()}")
+    if not keys:
+        print("  none found")
 
 
 def rank(trades: list[ForcedTrade]) -> list[ForcedTrade]:
@@ -303,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         return 30
     best = ranked[0]
     print_trade(best)
+    print_level_map(best.index)
     print("\nALL CANDIDATES:")
     for t in ranked:
         strike = f"{t.option.strike:,.0f} {t.option.kind}" if t.option else "no strike"

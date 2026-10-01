@@ -24,3 +24,5 @@ jobs:
       - run: python old.py --self-test
       - run: python -m compileall -q index.py tests/test_index.py
       - run: python index.py --self-test
+      - run: python -m compileall -q opt.py tests/test_opt.py
+      - run: python opt.py --self-test

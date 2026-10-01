@@ -110,17 +110,25 @@ def oi_flow(chain: dict, spot: float, band_pct: float = 1.0) -> float:
     return 0.0 if total == 0 else (put_add - call_add) / total
 
 
+MAX_T1_R = 3.0      # a 15-minute-time-stop option trade does not reach further
+MAX_T2_R = 4.0
+
+
 def _zone_targets(entry: float, side: int, risk: float, keys: list[Zone]) -> tuple[float, float, str]:
     if side == 1:
-        ahead = sorted((z.low for z in keys if z.low > entry))
+        ahead = sorted(z.low for z in keys if z.low > entry)
     else:
         ahead = sorted((z.high for z in keys if z.high < entry), reverse=True)
-    ahead = [p for p in ahead if side * (p - entry) >= 1.0 * risk]
-    if ahead:
-        t1 = ahead[0]
-        t2 = ahead[1] if len(ahead) > 1 else entry + side * max(2.5 * risk, abs(t1 - entry) + risk)
+    dist = lambda p: side * (p - entry) / risk
+    in_reach = [p for p in ahead if 1.0 <= dist(p) <= MAX_T1_R]
+    if in_reach:
+        t1 = in_reach[0]
+        beyond = [p for p in ahead if dist(p) > dist(t1) and dist(p) <= MAX_T2_R]
+        t2 = beyond[0] if beyond else entry + side * min(MAX_T2_R, max(2.5, dist(t1) + 0.5)) * risk
         return t1, t2, "KEY LEVELS"
-    return entry + side * 1.5 * risk, entry + side * 2.5 * risk, "R-MULTIPLE (no key level in reach)"
+    far = [p for p in ahead if dist(p) > MAX_T1_R]
+    note = f"next key level {far[0]:,.2f} is {dist(far[0]):.1f}R away -- too far" if far else "no key level ahead"
+    return entry + side * 1.5 * risk, entry + side * 2.5 * risk, f"R-MULTIPLE ({note})"
 
 
 def forced_trade(index: str, cs: list[Candle], keys: list[Zone], bias: int, chain: dict,
@@ -208,7 +216,11 @@ def scan_index(index: str, client: PsygridClient, cfg: IndexConfig, bias: int,
         return [], f"{index}: feed error ({exc})"
     cs = completed_candles(payload, now)
     if len(cs) < 5:
-        return [], f"{index}: not enough candles yet"
+        rows = (payload.get("1m") or payload.get("candles_1m") or []) if isinstance(payload, dict) else []
+        last = rows[-1].get("timestamp") if rows and isinstance(rows[-1], dict) else "none"
+        feed_clock = ((payload.get("session") or {}).get("current_time_ist") if isinstance(payload, dict) else None)
+        return [], (f"{index}: only {len(cs)} usable candles (feed sent {len(rows)} rows, last {last}, "
+                    f"feed clock {feed_clock}) -- skipped")
     day = now.date().isoformat()
     store = load_store()
     update_store(store, index, day, cs)

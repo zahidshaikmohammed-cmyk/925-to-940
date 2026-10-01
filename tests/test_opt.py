@@ -52,10 +52,22 @@ class ForcedTests(unittest.TestCase):
     def test_targets_use_key_levels_when_in_reach(self):
         keys = [Zone(22700, 22705, 5.0, ("PDH", "CALL WALL")), Zone(22800, 22800, 5.0, ("ROUND", "CALL WALL"))]
         t1, t2, basis = _zone_targets(22650.0, 1, 20.0, keys)
-        self.assertEqual((t1, t2, basis), (22700, 22800, "KEY LEVELS"))
+        self.assertEqual((t1, t2, basis), (22700, 22710.0, "KEY LEVELS"))   # 22800 is 7.5R: capped
         t1, t2, basis = _zone_targets(22650.0, 1, 20.0, [])
         self.assertEqual((t1, t2), (22680.0, 22700.0))
         self.assertTrue(basis.startswith("R-MULTIPLE"))
+
+    def test_far_key_level_is_not_used_as_target(self):
+        far = [Zone(23700, 23700, 6.0, ("ROUND", "CALL WALL"))]          # ~52R away
+        t1, t2, basis = _zone_targets(22650.0, 1, 20.0, far)
+        self.assertEqual((t1, t2), (22680.0, 22700.0))
+        self.assertIn("too far", basis)
+
+    def test_second_target_capped(self):
+        keys = [Zone(22700, 22700, 5.0, ("PDH", "CALL WALL")), Zone(23000, 23000, 5.0, ("ROUND", "CALL WALL"))]
+        t1, t2, _ = _zone_targets(22650.0, 1, 20.0, keys)
+        self.assertEqual(t1, 22700)
+        self.assertLessEqual(t2, 22650.0 + 4.0 * 20.0)
 
     def test_entering_under_resistance_is_penalised(self):
         spot = UPTREND[-1].close

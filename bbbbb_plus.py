@@ -9,11 +9,11 @@ only listens in on which candidate the engine selected. Then it adds:
     TP2        the day's high/low when it sits between 1R and 2R,
                otherwise bbbbb.py's own 2R target
     TIME STOP  exit if not +0.5R within 20 minutes; max hold 60 minutes
-    MANAGER    optional live trade manager that beeps on every action
+    MANAGER    optional live trade manager (only with --manage)
 
 Usage:
-    python bbbbb_plus.py              bbbbb.py output + exit plan + trade manager
-    python bbbbb_plus.py --no-manage  bbbbb.py output + exit plan only
+    python bbbbb_plus.py              bbbbb.py output + exit plan, then stops
+    python bbbbb_plus.py --manage     also ask for your fill and run the trade manager
     python bbbbb_plus.py --self-test
 """
 from __future__ import annotations
@@ -106,7 +106,8 @@ class _Spy:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="bbbbb.py with better exits")
-    parser.add_argument("--no-manage", action="store_true", help="print the exit plan only")
+    parser.add_argument("--manage", action="store_true", help="ask for your fill and run the trade manager")
+    parser.add_argument("--no-manage", action="store_true", help=argparse.SUPPRESS)   # old flag, now the default
     parser.add_argument("--self-test", action="store_true")
     args, engine_args = parser.parse_known_args(argv)
     if args.self_test:
@@ -126,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     plan = exit_plan(best, candles)
     print_exit_plan(best, plan, cfg)
 
-    if args.no_manage or not candles:
+    if not args.manage or not candles:
         return code
     fill = ask_fill(best)
     if fill is None:

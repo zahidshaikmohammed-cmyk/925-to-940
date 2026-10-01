@@ -68,11 +68,21 @@ def test_extension_is_hard_gate():
 
 
 def test_persistence_requires_three_observations():
+    # evaluate() records the current observation before gating, so one prior
+    # observation plus this scan is only two.
     state = CandidateState()
-    state.observations = [1, 1]
+    state.observations = [1]
     d = evaluate(snapshot(), state)
     assert not d.qualified
     assert "less_than_3_observations" in d.rejection_reasons
+
+
+def test_third_observation_qualifies():
+    state = CandidateState()
+    state.observations = [1, 1]
+    d = evaluate(snapshot(), state)
+    assert state.count == 3
+    assert d.qualified
 
 
 def test_final_lock_requires_0940_or_later():

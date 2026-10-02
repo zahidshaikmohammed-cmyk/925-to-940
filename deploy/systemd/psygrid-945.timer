@@ -1,0 +1,11 @@
+[Unit]
+Description=Start the PSYGRID 945 lifecycle every weekday before the 09:45 decision
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:05:00 Asia/Kolkata
+# If the VM was down at 09:05, start as soon as it is up (late decisions record their lag).
+Persistent=true
+Unit=psygrid-945.service
+
+[Install]
+WantedBy=timers.target

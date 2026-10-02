@@ -102,24 +102,55 @@ engine_audit.jsonl
 
 This makes tomorrow's run reproducible and debuggable.
 
-## 945.py -- 09:45 intraday selector
+## 945.py -- 09:45 intraday selector (model 945-V1)
 
 `945.py` reads the existing PSYGRID public feed (`/public/live.json`, optional
-`/public/nifty.json`) and never touches the live data plane. Decisions and outcomes
-are stored in `data/psygrid_945.sqlite` (decisions are insert-only).
+`/public/nifty.json`). It never writes to PSYGRID and opens no listening port.
 
-| When | Command | What it does |
+### Automatic daily lifecycle (no manual archive needed)
+
+Install once:
+
+* Windows PC: `powershell -ExecutionPolicy Bypass -File deploy\windows\install_945_task.ps1`
+  (weekdays 09:05, console window visible, catches up if the PC was off).
+* Linux VM next to PSYGRID: `sudo bash deploy/systemd/install.sh` (timer weekdays
+  09:05 IST, reads `127.0.0.1:10000`, CPU 50% / RAM 512 MB / idle-IO caps, no port).
+
+Or simply run `python 945.py` any time on a trading day. It then runs the whole day:
+
+| Time (IST) | Step | Stored |
 |---|---|---|
-| Any time before 09:45 | `python 945.py` | waits for 09:45:03 IST, freezes candles < 09:45, ranks the universe, publishes exactly one stock + direction, beeps |
-| After 09:45 | `python 945.py` | same decision from the 09:45 cut; if already published, prints the stored immutable decision |
-| After 10:15 | `python 945.py --evaluate` | +5/+15/+30 minute outcomes (MFE, MAE, hit, time-to-move) |
-| After 15:30 | `python 945.py --archive` | saves the full session to `data/sessions/` for future backtests |
-| Any time | `python 945.py --backtest data/sessions` | walk-forward replay + report (separate `data/backtest_945.sqlite`) |
-| Any time | `python 945.py --show [--date YYYY-MM-DD]` | print a stored decision and its outcomes |
-| Any time | `python 945.py --benchmark` / `--self-test` | 989-stock benchmark / test suite |
+| 09:45:03 | validate feed (trading day, today's session, feed clock age, 09:44 candle, valid universe) -> freeze candles < 09:45 -> rank all stocks -> publish exactly one -> beep | decision + full feature matrix + full ranking + frozen input file (one transaction) |
+| 09:51 / 10:01 / 10:16 | +5 / +15 / +30 min outcomes (return, MFE/MAE and their minute, hit, time-to-move) | `outcomes`, universe forward returns, feature IC |
+| after +30 | daily report | `data/reports/YYYY-MM-DD.txt`, `data/reports/daily_summary.csv` |
+| 15:31 | full-session archive | `data/sessions/YYYY-MM-DD.json.gz` |
 
-Score (0-100) is a ranking score, not a probability. Probability is labelled
-`UNCALIBRATED_HEURISTIC` until at least 60 out-of-sample decisions with outcomes exist;
-then it becomes `EMPIRICAL_WALK_FORWARD` (estimated only from earlier sessions).
-Model weights live in `intelligence/selector_weights_v1.json`; the backtest report's
-feature-IC section shows which features have earned their weight.
+If the feed fails validation, NO decision is published (retries until 15:25, every
+attempt logged in `feed_checks`). Restarting at any time resumes the day; nothing is
+ever duplicated or changed.
+
+### Commands
+
+| Command | Purpose |
+|---|---|
+| `python 945.py --status` | today's state; exit code 2 if a step is overdue (monitoring) |
+| `python 945.py --verify [--date D]` | re-decide from the stored frozen input; fingerprints must match |
+| `python 945.py --show [--date D]` | stored decision + outcomes |
+| `python 945.py --research` | cumulative research report (features, regimes, liquidity, direction, horizon, concentration, stability, score vs outcome, calibration) |
+| `python 945.py --backtest data/sessions` | walk-forward replay of archived sessions (separate `data/backtest_945.sqlite`) |
+| `python 945.py --decide-only` / `--evaluate` / `--archive` | individual lifecycle steps |
+| `python 945.py --benchmark` / `--self-test` | 989-stock integrated benchmark / tests |
+
+### Integrity guarantees
+
+* Decision, feature-matrix, ranking, frozen-input, outcome and universe-forward rows are
+  protected by SQLite triggers (no UPDATE / DELETE) and a unique (date, mode, model_id) key.
+* Every decision stores model id `945-V1`, feature version, config hash, weights hash,
+  sector-map hash, input fingerprint and decision fingerprint.
+* Score (0-100) is a ranking score, never a probability. Probability is
+  `UNCALIBRATED_HEURISTIC` until 60 out-of-sample outcomes exist; afterwards it is
+  estimated ONLY from earlier sessions (`EMPIRICAL_WALK_FORWARD`).
+* 945-V1 weights (`intelligence/selector_weights_v1.json`) are hand-set priors. Do not
+  tune them on the first sessions; use `--research` after 60+ sessions.
+* Sector features exist only for symbols in `sector_map.json` (pluggable via
+  `--sector-map`); coverage is printed with every decision, unclassified stocks stay null.

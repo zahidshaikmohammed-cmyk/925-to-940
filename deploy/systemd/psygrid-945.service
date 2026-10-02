@@ -1,0 +1,36 @@
+# PSYGRID 945 -- daily research lifecycle. Read-only consumer of the PSYGRID feed:
+# opens NO listening port, writes only to its own data directory, and is CPU / memory /
+# I/O capped so it can never starve the production PSYGRID service on the same VM.
+[Unit]
+Description=PSYGRID 945 daily 09:45 selector lifecycle (read-only feed consumer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=psygrid945
+Group=psygrid945
+WorkingDirectory=/opt/psygrid-945
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+# Same host as PSYGRID -> loopback, never the public interface.
+ExecStart=/usr/bin/python3 /opt/psygrid-945/945.py --daemon --base-url http://127.0.0.1:10000 --data-dir /var/lib/psygrid-945
+# 20 = not a trading day, 31 = feed never became valid (logged; retrying cannot help).
+RestartPreventExitStatus=20 31
+Restart=on-failure
+RestartSec=60
+# Resource isolation from the live data plane.
+Nice=10
+CPUQuota=50%
+MemoryMax=512M
+IOSchedulingClass=idle
+# Sandboxing.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/psygrid-945
+StateDirectory=psygrid-945
+
+[Install]
+WantedBy=multi-user.target

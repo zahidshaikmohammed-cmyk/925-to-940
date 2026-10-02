@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
   PYTHONPATH: .
@@ -11,23 +12,26 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install -r requirements.txt
-      - run: python -m compileall -q config.py strategy_930.py psygrid_client.py run_engine.py bbbbb.py tests/test_strategy_930.py tests/test_run_engine.py
-      - run: python -m unittest tests.test_strategy_930 tests.test_run_engine -v
-      - run: python bbbbb.py --self-test
-      - run: python -m compileall -q old.py tests/test_old.py tests/test_old_manager.py
-      - run: python old.py --self-test
-      - run: python -m compileall -q index.py tests/test_index.py
-      - run: python index.py --self-test
-      - run: python -m compileall -q opt.py tests/test_opt.py
-      - run: python opt.py --self-test
-      - run: python -m compileall -q bbbbb_plus.py tests/test_bbbbb_plus.py
-      - run: python bbbbb_plus.py --self-test
-      - run: python -m compileall -q 945.py intelligence tests/test_945.py
-      - run: python 945.py --self-test
-      - run: python 945.py --benchmark
+      - name: Byte-compile everything
+        run: python -m compileall -q .
+      - name: Full repository test suite (stdlib unittest discovery, no pytest needed)
+        run: python -m unittest discover -s tests -t . -v
+      - name: Engine self-tests
+        run: |
+          python bbbbb.py --self-test
+          python old.py --self-test
+          python index.py --self-test
+          python opt.py --self-test
+          python bbbbb_plus.py --self-test
+          python 945.py --self-test
+      - name: 945 production-scale benchmark (989 stocks, integrated path)
+        run: python 945.py --benchmark
+      - name: Verify systemd units
+        run: systemd-analyze verify deploy/systemd/psygrid-945.timer deploy/systemd/psygrid-945.service

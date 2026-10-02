@@ -28,3 +28,6 @@ jobs:
       - run: python opt.py --self-test
       - run: python -m compileall -q bbbbb_plus.py tests/test_bbbbb_plus.py
       - run: python bbbbb_plus.py --self-test
+      - run: python -m compileall -q 945.py intelligence tests/test_945.py
+      - run: python 945.py --self-test
+      - run: python 945.py --benchmark

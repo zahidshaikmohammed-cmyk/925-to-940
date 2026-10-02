@@ -1,0 +1,38 @@
+{
+  "_comment": "Model v1 priors. Explicit, configurable, NOT fitted to any historical day. Signed features are oriented so + = bullish evidence; DOWN uses the same weights on the negated z-scores. Keep or drop features based on the walk-forward IC report (python 945.py --backtest ...).",
+  "signed": {
+    "rel_market": 0.14,
+    "residual_return": 0.08,
+    "sector_rel": 0.06,
+    "efficiency_ratio": 0.16,
+    "return_15m": 0.08,
+    "return_5m": 0.04,
+    "ema_spread_pct": 0.08,
+    "slope_10_pct": 0.06,
+    "or_position": 0.08,
+    "volume_imbalance": 0.1,
+    "persistence_10": 0.06,
+    "structure": 0.04,
+    "day_range_position": 0.02
+  },
+  "activity": {
+    "floor": 0.5,
+    "features": {
+      "pct_turnover": 0.5,
+      "pct_activity": 0.5
+    }
+  },
+  "penalties": {
+    "overextension_weight": 1.0,
+    "gap_exhaustion_pct": 3.0,
+    "gap_exhaustion_weight": 0.25,
+    "short_term_reversal_weight": 0.15,
+    "overextension_range_threshold": 0.6
+  },
+  "score_mapping": {
+    "center": 1.5,
+    "scale": 0.45
+  },
+  "z_clip": 3.0,
+  "_score_mapping_note": "Calibrated to the noise floor: on synthetic random 989-stock sessions the best raw evidence is ~1.8-2.0 (score ~70). 95+ requires raw >= ~2.9, i.e. almost every signed feature aligned near the clip. Score is a ranking score, not a probability."
+}

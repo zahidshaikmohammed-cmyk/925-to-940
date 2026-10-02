@@ -101,3 +101,25 @@ engine_audit.jsonl
 ```
 
 This makes tomorrow's run reproducible and debuggable.
+
+## 945.py -- 09:45 intraday selector
+
+`945.py` reads the existing PSYGRID public feed (`/public/live.json`, optional
+`/public/nifty.json`) and never touches the live data plane. Decisions and outcomes
+are stored in `data/psygrid_945.sqlite` (decisions are insert-only).
+
+| When | Command | What it does |
+|---|---|---|
+| Any time before 09:45 | `python 945.py` | waits for 09:45:03 IST, freezes candles < 09:45, ranks the universe, publishes exactly one stock + direction, beeps |
+| After 09:45 | `python 945.py` | same decision from the 09:45 cut; if already published, prints the stored immutable decision |
+| After 10:15 | `python 945.py --evaluate` | +5/+15/+30 minute outcomes (MFE, MAE, hit, time-to-move) |
+| After 15:30 | `python 945.py --archive` | saves the full session to `data/sessions/` for future backtests |
+| Any time | `python 945.py --backtest data/sessions` | walk-forward replay + report (separate `data/backtest_945.sqlite`) |
+| Any time | `python 945.py --show [--date YYYY-MM-DD]` | print a stored decision and its outcomes |
+| Any time | `python 945.py --benchmark` / `--self-test` | 989-stock benchmark / test suite |
+
+Score (0-100) is a ranking score, not a probability. Probability is labelled
+`UNCALIBRATED_HEURISTIC` until at least 60 out-of-sample decisions with outcomes exist;
+then it becomes `EMPIRICAL_WALK_FORWARD` (estimated only from earlier sessions).
+Model weights live in `intelligence/selector_weights_v1.json`; the backtest report's
+feature-IC section shows which features have earned their weight.

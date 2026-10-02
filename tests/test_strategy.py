@@ -1,7 +1,11 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import pytest
+try:
+    import pytest
+    raises = pytest.raises
+except ImportError:  # stdlib unittest runner (CI) -- no pytest needed
+    from tests._compat import raises
 
 from strategy import (
     BenchmarkSnapshot,
@@ -68,8 +72,10 @@ def test_extension_is_hard_gate():
 
 
 def test_persistence_requires_three_observations():
+    # evaluate() records the current observation before gating, so one prior
+    # observation + the current one = 2 < 3 and must be rejected.
     state = CandidateState()
-    state.observations = [1, 1]
+    state.observations = [1]
     d = evaluate(snapshot(), state)
     assert not d.qualified
     assert "less_than_3_observations" in d.rejection_reasons
@@ -77,7 +83,7 @@ def test_persistence_requires_three_observations():
 
 def test_final_lock_requires_0940_or_later():
     d = DecisionFixture.qualified("ABC", 90)
-    with pytest.raises(ValueError):
+    with raises(ValueError):
         rank_and_lock([d], datetime(2026, 9, 15, 9, 39, tzinfo=IST))
 
 
@@ -93,3 +99,8 @@ class DecisionFixture:
         from strategy import Decision, FeatureVector
         f = FeatureVector(1, 1, 1, 1, 1, 1, 1, 1, 1, 0.5, 0.5, score)
         return Decision(symbol, "LONG", score, f, True, ())
+
+
+from tests._compat import function_tests  # noqa: E402
+
+load_tests = function_tests(globals())

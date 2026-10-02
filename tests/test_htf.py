@@ -1,7 +1,11 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import pytest
+try:
+    import pytest
+    raises = pytest.raises
+except ImportError:  # stdlib unittest runner (CI) -- no pytest needed
+    from tests._compat import raises
 
 from htf import trend_sign
 from strategy import Candle
@@ -25,5 +29,10 @@ def test_htf_downtrend():
 
 
 def test_htf_requires_warmup():
-    with pytest.raises(ValueError):
+    with raises(ValueError):
         trend_sign(series([100 + i for i in range(20)]))
+
+
+from tests._compat import function_tests  # noqa: E402
+
+load_tests = function_tests(globals())

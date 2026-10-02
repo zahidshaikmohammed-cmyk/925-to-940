@@ -48,8 +48,19 @@ class Candidate:
 
 
 class RankingModel(Protocol):
+    """Contract for every 945 model generation.
+
+    model_id   stable identifier stored with every decision (e.g. "945-V1")
+    fit(h)     called by the backtest/live pipeline BEFORE each session with ONLY the
+               (decision, outcomes, feature rows) of strictly earlier sessions. A
+               statistically trained V2 must learn here and nowhere else.
+    rank(t)    deterministic scoring of every eligible stock in both directions.
+    """
+    model_id: str
     name: str
     version: str
+
+    def fit(self, history: list) -> "RankingModel": ...
 
     def rank(self, table: FeatureTable) -> list[Candidate]: ...
 
@@ -73,11 +84,17 @@ def robust_z(values: dict, clip: float) -> dict:
 
 
 class LinearEvidenceModel:
+    """945-V1: explicit, hand-set prior weights. NOT empirically optimised."""
+    model_id = "945-V1"
     name = "linear-evidence"
     version = "1"
 
     def __init__(self, weights: dict):
         self.w = weights
+        self.trained_through = None          # V1 learns nothing
+
+    def fit(self, history: list) -> "LinearEvidenceModel":
+        return self                          # no parameters are estimated from data
 
     def rank(self, table: FeatureTable) -> list[Candidate]:
         elig = table.eligible

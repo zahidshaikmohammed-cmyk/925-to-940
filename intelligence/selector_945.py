@@ -10,8 +10,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .selector_calibration import Calibrator
-from .selector_config import MODEL_NAME, MODEL_VERSION, SelectorConfig, weights_hash
-from .selector_data import SessionInput
+from .selector_config import (FEATURE_VERSION, MODEL_NAME, MODEL_VERSION, SelectorConfig, config_hash,
+                              weights_hash)
+from .selector_data import SessionInput, recut
 from .selector_features import build_feature_table
 from .selector_scoring import Candidate, LinearEvidenceModel, RankingModel, select
 from .selector_snapshot import DecisionSnapshot, build_snapshot
@@ -49,11 +50,38 @@ def explain(c: Candidate, top: int = 5) -> list[str]:
     return lines
 
 
+def _feature_stats(table) -> dict:
+    """Distribution of every numeric feature over the eligible universe (research record)."""
+    out = {}
+    names = sorted({k for s in table.eligible for k, v in table.features[s].items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)})
+    for name in names:
+        vals = sorted(table.features[s][name] for s in table.eligible
+                      if isinstance(table.features[s].get(name), (int, float))
+                      and not isinstance(table.features[s].get(name), bool))
+        n = len(vals)
+        nulls = len(table.eligible) - n
+        if not n:
+            out[name] = {"n": 0, "nulls": nulls}
+            continue
+        q = lambda p: vals[min(n - 1, int(p * (n - 1) + 0.5))]
+        out[name] = {"n": n, "nulls": nulls, "mean": round(sum(vals) / n, 6), "p10": round(q(0.1), 6),
+                     "median": round(q(0.5), 6), "p90": round(q(0.9), 6), "min": round(vals[0], 6),
+                     "max": round(vals[-1], 6)}
+    return out
+
+
 def decide(si: SessionInput, cfg: SelectorConfig, weights: dict, mode: str,
            sectors: dict | None = None, baselines: dict | None = None,
            history: list | None = None, model: RankingModel | None = None,
-           published_at: datetime | None = None) -> tuple[DecisionSnapshot, dict]:
-    """Returns (immutable snapshot, internals for diagnostics/benchmarks)."""
+           published_at: datetime | None = None, feed_health: dict | None = None,
+           sector_source: str = "none") -> tuple[DecisionSnapshot, dict]:
+    """Returns (immutable snapshot, internals: table, ranking, store rows).
+
+    Inputs are ONLY: the frozen 09:45 information set, prior-session baselines and
+    prior-session history (calibration / model fit). Nothing after the cutoff exists here.
+    """
+    sectors = sectors or {}
     table = build_feature_table(si, cfg, sectors, baselines)
     model = model or LinearEvidenceModel(weights)
     ranked = model.rank(table)
@@ -62,9 +90,23 @@ def decide(si: SessionInput, cfg: SelectorConfig, weights: dict, mode: str,
     f = table.features[best.symbol]
     reasons = Counter(table.exclusions.values())
     m = table.market
+
+    stability = {}
+    for t in cfg.stability_cutoffs:            # same model on EARLIER information only
+        try:
+            early = build_feature_table(recut(si, t), cfg, sectors, baselines)
+            r = model.rank(early)
+            pos = next((i + 1 for i, c in enumerate(r) if (c.symbol, c.direction) == (best.symbol, best.direction)), None)
+            stability[t.strftime("%H:%M")] = {"rank": pos, "of": len(r), "top_then": r[0].symbol if r else None}
+        except Exception as exc:
+            stability[t.strftime("%H:%M")] = {"error": type(exc).__name__}
+
+    published = published_at or datetime.now(IST)
+    universe_sectored = sum(1 for s in si.received_symbols if sectors.get(s))
+    eligible_sectored = sum(1 for s in table.eligible if table.features[s].get("sector_rel") is not None)
     snap = build_snapshot(
         decision_id="", decision_date=si.session_date.isoformat(), cutoff=si.cutoff.isoformat(),
-        published_at=(published_at or datetime.now(IST)).isoformat(), mode=mode,
+        published_at=published.isoformat(), mode=mode,
         universe_size=len(si.received_symbols), eligible_count=len(table.eligible),
         excluded_count=len(table.exclusions), exclusion_reasons=dict(sorted(reasons.items())),
         selected_symbol=best.symbol, direction=best.direction,
@@ -85,18 +127,34 @@ def decide(si: SessionInput, cfg: SelectorConfig, weights: dict, mode: str,
                           for i, c in enumerate(ranked[:cfg.ranking_snapshot_size])],
         market_context={"market_return_pct": m.market_return, "market_source": m.market_source,
                         "breadth": m.breadth, "regime": m.regime,
-                        "sector_map_coverage": sum(1 for s in table.eligible if table.features[s].get("sector")),
-                        "feed_meta": si.feed_meta},
+                        # only time-invariant feed metadata may enter the fingerprinted body;
+                        # the feed clock / live status live in feed_health (not fingerprinted)
+                        "declared_universe_size": si.feed_meta.get("universe_size")},
         data_quality={"selected": {k: f.get(k) for k in ("n_bars", "missing_minutes", "last_bar_age_min", "stale",
                                                         "missing_field_count", "data_quality_score",
                                                         "spread_available", "opening_price_source",
                                                         "relative_volume_source")},
                       "universe_unparseable": len(si.unparseable),
                       "freshness": "PASS" if not f.get("stale") else "FAIL"},
+        model_id=getattr(model, "model_id", "unknown"),
         model_name=f"{MODEL_NAME}/{model.name}", model_version=f"{MODEL_VERSION}+{model.version}",
-        weights_hash=weights_hash(weights), input_fingerprint=si.fingerprint, decision_fingerprint="",
+        feature_version=FEATURE_VERSION, config_hash=config_hash(cfg), weights_hash=weights_hash(weights),
+        sector_coverage={"source": sector_source, "universe_classified": universe_sectored,
+                         "universe": len(si.received_symbols), "eligible_with_sector_feature": eligible_sectored,
+                         "eligible": len(table.eligible),
+                         "note": "unclassified stocks keep sector features null -- never inferred"},
+        feature_stats=_feature_stats(table),
+        stability=stability,
+        feed_health=feed_health or {"validated": False, "note": "offline/replay input -- no live feed checks"},
+        publication_lag_seconds=round((published - si.cutoff).total_seconds(), 3),
+        input_fingerprint=si.fingerprint, decision_fingerprint="",
     )
-    return snap, {"table": table, "ranked": ranked, "estimate": est}
+    feature_rows = [(s, s in table.eligible, table.exclusions.get(s),
+                     {k: v for k, v in table.features.get(s, {}).items()})
+                    for s in si.received_symbols]
+    ranking_rows = [(c.symbol, c.direction, round(c.raw, 6), round(c.score, 4)) for c in ranked]
+    return snap, {"table": table, "ranked": ranked, "estimate": est,
+                  "feature_rows": feature_rows, "ranking_rows": ranking_rows}
 
 
 def render(snap: DecisionSnapshot) -> str:
@@ -131,6 +189,7 @@ def render(snap: DecisionSnapshot) -> str:
     lines += [f"{i}. {t}" for i, t in enumerate(d["explanation"], 1)] or ["(no positive contributions)"]
     q = d["data_quality"]["selected"]
     mc = d["market_context"]
+    sc = d["sector_coverage"]
     lines += [
         "",
         "MARKET CONTEXT",
@@ -143,7 +202,23 @@ def render(snap: DecisionSnapshot) -> str:
         f"Input timestamp  : {d['cutoff']}",
         f"Input hash       : {d['input_fingerprint'][:16]}",
         f"Decision hash    : {d['decision_fingerprint'][:16]}  ({d['decision_id']})",
-        f"Model            : {d['model_name']} v{d['model_version']} | weights {d['weights_hash']}",
+        f"Model            : {d['model_id']} ({d['model_name']} v{d['model_version']}) | features {d['feature_version']}",
+        f"Config / weights : {d['config_hash']} / {d['weights_hash']}",
+        f"Sector coverage  : {sc['universe_classified']}/{sc['universe']} classified ({sc['source']}); "
+        f"{sc['eligible_with_sector_feature']}/{sc['eligible']} eligible have a sector feature, rest null",
+        f"Rank stability   : " + " | ".join(f"{t}: rank {v.get('rank')} of {v.get('of')}" for t, v in sorted(d['stability'].items())),
+    ]
+    fh = d["feed_health"]
+    if fh.get("checks"):
+        lines += ["", "FEED", f"Feed clock       : {fh.get('feed_clock') or 'not provided'} | age "
+                  f"{'n/a' if fh.get('feed_age_seconds') is None else round(fh['feed_age_seconds'])}s | local {fh.get('local_time')}",
+                  f"Session / status : {fh.get('session_date')} / {fh.get('market_status')}",
+                  f"Universe / valid : {fh.get('universe_count')} / {fh.get('valid_count')} (missing {fh.get('missing_count')})",
+                  "Checks           : " + ", ".join(f"{n} {'PASS' if p else 'FAIL'}" for n, p, _ in fh["checks"]),
+                  f"Publication lag  : {d['publication_lag_seconds']:.1f}s after the 09:45 cutoff"]
+    else:
+        lines += ["", "FEED             : not validated (offline replay/backtest input)"]
+    lines += [
         "",
         "TOP 5 OF RANKING",
     ]

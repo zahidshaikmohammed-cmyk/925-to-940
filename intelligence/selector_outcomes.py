@@ -8,13 +8,15 @@ already-published decision plus the full RawSession and only reads candles in
 Per horizon (minutes after the 09:45 decision), with entry = the decision's
 reference price (last completed close at 09:44) and d = +1 UP / -1 DOWN:
     forward_return_pct   d * (close at end of window / entry - 1) * 100
-    mfe_pct              best favourable excursion inside the window (>= 0)
-    mae_pct              worst adverse excursion inside the window (<= 0)
+    mfe_pct / mfe_minute best favourable excursion inside the window (>= 0) and the minute
+                         (1-based, after 09:45) it first occurred
+    mae_pct / mae_minute worst adverse excursion inside the window (<= 0) and its minute
     direction_hit        forward_return_pct > 0
     minutes_to_favorable first minute whose favourable excursion >= move threshold
     minutes_to_adverse   first minute whose adverse excursion <= -move threshold
     outcome              WIN / LOSS / FLAT vs the probability threshold; INCOMPLETE if
-                         the window is not fully available yet
+                         the window is not fully available yet; NO_DATA_FINAL /
+                         INCOMPLETE_FINAL once the session can no longer complete it
 """
 from __future__ import annotations
 
@@ -32,6 +34,8 @@ class HorizonOutcome:
     forward_return_pct: float | None
     mfe_pct: float | None
     mae_pct: float | None
+    mfe_minute: int | None
+    mae_minute: int | None
     direction_hit: bool | None
     minutes_to_favorable: int | None
     minutes_to_adverse: int | None
@@ -42,17 +46,22 @@ class HorizonOutcome:
 
 
 def evaluate_horizon(entry: float, direction: str, bars, horizon: int, move_threshold: float,
-                     hit_threshold: float) -> HorizonOutcome:
+                     hit_threshold: float, final: bool = False) -> HorizonOutcome:
     d = 1 if direction == "UP" else -1
     n = len(bars) if bars is not None else 0
     if n == 0 or entry <= 0:
-        return HorizonOutcome(horizon, 0, False, None, None, None, None, None, None, "NO_DATA")
+        return HorizonOutcome(horizon, 0, False, None, None, None, None, None, None, None, None,
+                              "NO_DATA_FINAL" if final else "NO_DATA")
     mfe = mae = 0.0
+    mfe_min = mae_min = None
     t_fav = t_adv = None
     for i in range(n):
         fav = d * ((bars.h[i] if d == 1 else bars.l[i]) / entry - 1) * 100.0
         adv = d * ((bars.l[i] if d == 1 else bars.h[i]) / entry - 1) * 100.0
-        mfe, mae = max(mfe, fav), min(mae, adv)
+        if fav > mfe:
+            mfe, mfe_min = fav, i + 1
+        if adv < mae:
+            mae, mae_min = adv, i + 1
         if t_fav is None and fav >= move_threshold:
             t_fav = i + 1
         if t_adv is None and adv <= -move_threshold:
@@ -60,18 +69,18 @@ def evaluate_horizon(entry: float, direction: str, bars, horizon: int, move_thre
     fwd = d * (bars.c[-1] / entry - 1) * 100.0
     complete = n >= horizon
     if not complete:
-        label = "INCOMPLETE"
+        label = "INCOMPLETE_FINAL" if final else "INCOMPLETE"
     elif fwd > hit_threshold:
         label = "WIN"
     elif fwd < -hit_threshold:
         label = "LOSS"
     else:
         label = "FLAT"
-    return HorizonOutcome(horizon, n, complete, fwd, mfe, mae, fwd > 0, t_fav, t_adv, label)
+    return HorizonOutcome(horizon, n, complete, fwd, mfe, mae, mfe_min, mae_min, fwd > 0, t_fav, t_adv, label)
 
 
 def evaluate_decision(decision: dict, raw: RawSession, horizons, move_threshold: float,
-                      hit_threshold: float) -> list[HorizonOutcome]:
+                      hit_threshold: float, final: bool = False) -> list[HorizonOutcome]:
     """`decision` is DecisionSnapshot.to_dict() (or the stored JSON)."""
     if raw.session_date.isoformat() != decision["decision_date"]:
         raise ValueError(f"session {raw.session_date} does not match decision {decision['decision_date']}")
@@ -80,7 +89,7 @@ def evaluate_decision(decision: dict, raw: RawSession, horizons, move_threshold:
     out = []
     for h in horizons:
         bars = future_bars(raw, decision["selected_symbol"], cutoff, h)
-        out.append(evaluate_horizon(entry, decision["direction"], bars, h, move_threshold, hit_threshold))
+        out.append(evaluate_horizon(entry, decision["direction"], bars, h, move_threshold, hit_threshold, final))
     return out
 
 
@@ -90,6 +99,6 @@ def forward_returns_universe(raw: RawSession, cutoff: datetime, horizon: int, re
     out = {}
     for sym, ref in reference.items():
         bars = future_bars(raw, sym, cutoff, horizon)
-        if bars is not None and len(bars) and ref:
+        if bars is not None and len(bars) >= horizon and ref:     # complete windows only
             out[sym] = (bars.c[-1] / ref - 1) * 100.0
     return out

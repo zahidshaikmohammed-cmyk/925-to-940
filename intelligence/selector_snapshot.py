@@ -65,9 +65,17 @@ class DecisionSnapshot:
     ranking_snapshot: tuple
     market_context: object
     data_quality: object
+    model_id: str
     model_name: str
     model_version: str
+    feature_version: str
+    config_hash: str
     weights_hash: str
+    sector_coverage: object
+    feature_stats: object
+    stability: object
+    feed_health: object
+    publication_lag_seconds: float | None
     input_fingerprint: str
     decision_fingerprint: str
 
@@ -78,7 +86,10 @@ class DecisionSnapshot:
         return canonical_json(self.to_dict())
 
 
-FINGERPRINT_EXCLUDE = {"published_at", "decision_id", "decision_fingerprint", "mode"}
+# Wall-clock / environment fields are excluded so that the same frozen input + model
+# always yields the same decision fingerprint (reproducibility audit).
+FINGERPRINT_EXCLUDE = {"published_at", "decision_id", "decision_fingerprint", "mode", "feed_health",
+                       "publication_lag_seconds"}
 
 
 def build_snapshot(**kw) -> DecisionSnapshot:

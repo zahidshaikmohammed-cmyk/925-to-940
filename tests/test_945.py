@@ -352,8 +352,8 @@ class BacktestTests(unittest.TestCase):
             self.assertTrue(all(st.outcomes(d["decision_id"]) for d in st.decisions(mode="backtest")))
             st.close()
             rep = selector_backtest.report(db, CFG)
-            for text in ("HORIZON +5", "HORIZON +15", "HORIZON +30", "VALIDATION", "DIRECTION UP",
-                         "LIQUIDITY", "REGIME", "SELECTION FREQUENCY", "FEATURE VALIDATION"):
+            for text in ("HORIZON +5", "HORIZON +15", "HORIZON +30", "LATE (out-of-sample)", "DIRECTION UP",
+                         "LIQUIDITY", "REGIME", "SELECTION CONCENTRATION", "FEATURE VALIDATION"):
                 self.assertIn(text, rep)
             # re-running never overwrites the stored decisions
             again = selector_backtest.run_backtest([str(sessions)], db, CFG, W, {}, log=lambda *_: None)
@@ -389,10 +389,10 @@ class CliTests(unittest.TestCase):
         beeps = []
         mod.beep = lambda: beeps.append(clock[0])
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "live.sqlite")
+            db = str(Path(tmp) / "psygrid_945.sqlite")
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                self.assertEqual(mod.main(["--db", db]), 0)
+                self.assertEqual(mod.main(["--decide-only", "--data-dir", tmp]), 0)
             self.assertGreaterEqual(clock[0], datetime(2026, 9, 30, 9, 45, 3, tzinfo=IST))
             self.assertEqual(len(beeps), 1)
             first = Store(db).get_decision("2026-09-30", "live")
@@ -400,7 +400,7 @@ class CliTests(unittest.TestCase):
             mod.fetch = lambda base: (make_payload(200, minutes=375, seed=4), None)
             out2 = io.StringIO()
             with contextlib.redirect_stdout(out2):
-                mod.main(["--db", db])
+                mod.main(["--decide-only", "--data-dir", tmp])
             self.assertIn("already published and immutable", out2.getvalue())
             self.assertEqual(Store(db).get_decision("2026-09-30", "live").decision_fingerprint,
                              first.decision_fingerprint)
@@ -408,15 +408,15 @@ class CliTests(unittest.TestCase):
 
     def test_live_refuses_a_previous_day_feed(self):
         mod = load_945()
-        clock = [datetime(2026, 10, 1, 9, 46, 0, tzinfo=IST)]
+        clock = [datetime(2026, 10, 1, 15, 20, 0, tzinfo=IST)]      # keeps retrying until 15:25, then gives up
         mod.now = lambda: clock[0]
         mod.sleep = lambda s: clock.__setitem__(0, clock[0] + timedelta(seconds=max(s, 1)))
         mod.fetch = lambda base: (make_payload(100, session=date(2026, 9, 30), minutes=31, seed=3), None)
         mod.beep = lambda: None
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "live.sqlite")
+            db = str(Path(tmp) / "psygrid_945.sqlite")
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(mod.main(["--db", db]), 31)
+                self.assertEqual(mod.main(["--decide-only", "--data-dir", tmp]), 31)
             self.assertEqual(Store(db).decisions(), [])
 
 

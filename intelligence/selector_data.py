@@ -254,3 +254,16 @@ def load_session_file(path: str | Path) -> RawSession:
     if isinstance(data, dict) and "stocks_payload" in data:
         return parse_payload(data["stocks_payload"], data.get("index_payload"), source=str(path))
     return parse_payload(data, None, source=str(path))
+
+
+def recut(si: SessionInput, cutoff: time) -> SessionInput:
+    """An EARLIER information set derived from an already-frozen one (used for the rank
+    stability diagnostic). It can only remove data, never add any."""
+    end = cutoff_datetime(si.session_date, cutoff)
+    if end > si.cutoff:
+        raise ValueError("recut can only move the cutoff earlier")
+    start = datetime.combine(si.session_date, SESSION_START, IST)
+    stocks = {sym: _cut(s, si.session_date, start, end) for sym, s in si.stocks.items()}
+    index = _cut(si.index, si.session_date, start, end) if si.index is not None else None
+    return SessionInput(si.session_date, end, stocks, si.received_symbols, dict(si.unparseable),
+                        index if index is not None and len(index) else None, dict(si.feed_meta), si.source, "")

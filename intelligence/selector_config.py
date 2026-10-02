@@ -7,8 +7,11 @@ from dataclasses import dataclass, field
 from datetime import time
 from pathlib import Path
 
+MODEL_ID = "945-V1"                    # explicit-weight linear evidence model (NOT fitted)
 MODEL_NAME = "psygrid-945-linear-evidence"
 MODEL_VERSION = "1.0.0"
+FEATURE_VERSION = "F1.1"               # bump whenever any feature definition changes
+SCHEMA_VERSION = 2
 DEFAULT_WEIGHTS_PATH = Path(__file__).with_name("selector_weights_v1.json")
 
 
@@ -35,6 +38,17 @@ class SelectorConfig:
     ranking_snapshot_size: int = 25
     db_path: str = "data/psygrid_945.sqlite"
     sessions_dir: str = "data/sessions"
+    reports_dir: str = "data/reports"
+    # feed validation (a decision is published only when ALL pass)
+    max_feed_age_seconds: int = 180            # feed clock (or newest candle) vs local clock
+    min_valid_fraction: float = 0.5            # >= 50% of received stocks must have usable 09:45 history
+    min_valid_stocks: int = 50
+    fetch_retry_seconds: int = 3
+    fetch_retry_window_seconds: int = 60       # keep retrying a bad/stale feed this long, then fail safely
+    # lifecycle
+    outcome_buffer_seconds: int = 75           # evaluate horizon h at 09:45 + h min + buffer
+    archive_after: time = time(15, 31)
+    stability_cutoffs: tuple[time, ...] = (time(9, 35), time(9, 40))
 
 
 def load_weights(path: str | Path | None = None) -> dict:
@@ -45,6 +59,18 @@ def load_weights(path: str | Path | None = None) -> dict:
     if abs(total - 1.0) > 1e-9:
         raise ValueError(f"signed feature weights must sum to 1.0, got {total:.6f} ({p})")
     return weights
+
+
+# Storage locations do not influence decisions, so they never enter the config hash: the
+# same model configuration hashes identically on every machine / folder.
+NON_DECISION_FIELDS = {"db_path", "sessions_dir", "reports_dir"}
+
+
+def config_hash(cfg: "SelectorConfig") -> str:
+    from dataclasses import asdict
+    body = {k: v for k, v in asdict(cfg).items() if k not in NON_DECISION_FIELDS}
+    blob = json.dumps(body, sort_keys=True, default=str, separators=(",", ":")).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def weights_hash(weights: dict) -> str:

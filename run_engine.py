@@ -15,6 +15,8 @@ from strategy_930 import Candidate, evaluate_tiers
 
 IST = ZoneInfo("Asia/Kolkata")
 BASE_URL = "http://140.245.226.102:10000"
+# The two-node PSYGRID Live Core: same /public/live.json contract, 989-stock universe (bbbbb.py uses it).
+LIVE_CORE_URL = "http://129.225.112.47:10000"
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
@@ -230,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
     parser.add_argument("--preflight-only", action="store_true", help="inspect the atomic 990-stock public endpoint and exit")
     parser.add_argument("--base-url", default=BASE_URL)
+    parser.add_argument("--expected-universe", type=int, default=EXPECTED_UNIVERSE, help="universe_size the feed must declare")
+    parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds (default: strategy config)")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -238,7 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = StrategyConfig()
     cfg.validate()
     audit = Audit()
-    client = PsygridClient(args.base_url, timeout=cfg.http_timeout_seconds)
+    timeout = args.timeout if args.timeout is not None else cfg.http_timeout_seconds
+    client = PsygridClient(args.base_url, timeout=timeout, expected_universe=args.expected_universe)
     sectors = load_sector_map()
 
     print_banner()
@@ -290,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
 
     print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S.%f} IST")
-    print(f"UNIVERSE     : {len(parsed)}/{EXPECTED_UNIVERSE} unique stocks received")
+    print(f"UNIVERSE     : {len(parsed)}/{args.expected_universe} unique stocks received")
     print(f"HEALTHY      : {len(healthy)}")
     print(f"SKIPPED      : {len(unhealthy)} stock(s) failed per-stock feed checks")
     print(f"SHARD ISSUES : {len(client.last_market_errors)}")

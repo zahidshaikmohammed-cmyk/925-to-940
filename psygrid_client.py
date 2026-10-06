@@ -14,6 +14,8 @@ from strategy_930 import Candle
 IST = ZoneInfo("Asia/Kolkata")
 ENDPOINT_PATH = "public/live.json"
 EXPECTED_UNIVERSE = 990
+# The two-node PSYGRID Live Core (http://129.225.112.47:10000) serves the 989-stock universe.
+LIVE_CORE_UNIVERSE = 989
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
@@ -64,9 +66,10 @@ class PsygridClient:
     No 5m/15m/depth/LTP-timestamp feed is used.
     """
 
-    def __init__(self, base_url: str, timeout: float = 4.0):
+    def __init__(self, base_url: str, timeout: float = 4.0, expected_universe: int = EXPECTED_UNIVERSE):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
+        self.expected_universe = expected_universe
         self.last_market_errors: tuple[str, ...] = ()
         self.last_market_coverage: int = 0
         self.last_market_duplicates: tuple[str, ...] = ()
@@ -105,8 +108,8 @@ class PsygridClient:
             declared = payload.get("stock_count")
             universe = payload.get("universe_size")
             errors: list[str] = []
-            if universe not in (None, EXPECTED_UNIVERSE):
-                errors.append(f"universe_size={universe}, expected={EXPECTED_UNIVERSE}")
+            if universe not in (None, self.expected_universe):
+                errors.append(f"universe_size={universe}, expected={self.expected_universe}")
             if declared != count:
                 errors.append(f"declared stock_count={declared}, actual records={count}")
             if count == 0:
@@ -147,8 +150,8 @@ class PsygridClient:
         service_status = payload.get("status")
         session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
 
-        if universe not in (None, EXPECTED_UNIVERSE):
-            errors.append(f"endpoint universe_size={universe}, expected={EXPECTED_UNIVERSE}")
+        if universe not in (None, self.expected_universe):
+            errors.append(f"endpoint universe_size={universe}, expected={self.expected_universe}")
         if declared != len(stocks):
             errors.append(
                 f"endpoint declared stock_count={declared}, actual records={len(stocks)}; valid records retained"

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
 from psygrid_client import ENDPOINT_PATH, EXPECTED_UNIVERSE, Health, PsygridClient, StockData
-from strategy_930 import Candidate, evaluate_tiers
+from strategy_930 import Candidate, Candle, evaluate_tiers
 
 IST = ZoneInfo("Asia/Kolkata")
 BASE_URL = "http://140.245.226.102:10000"
@@ -71,8 +71,31 @@ def print_banner() -> None:
     print("Completed 1m candles available at runtime | latest completed 1m close | Tier 1 -> Tier 2 -> Tier 3")
     print("Previous close is OPTIONAL metadata and never blocks signal generation")
     print("Rolling impulse/retracement geometry + rolling relative strength are used for rescans")
-    print("Tier 3 prevents strategic NO SIGNAL; feed integrity is enforced per stock, not globally")
+    print("Precision: live session only | stale/thin stocks skipped | VWAP stretch capped | break-of-candle trigger")
+    print("Tier 3 is a labelled forced pick (LOW_CONFIDENCE_FORCED), never presented as a setup")
     print("=" * 96)
+
+
+TIER_LABELS = {
+    1: "(STRICT)",
+    2: "(FALLBACK)",
+    3: "(FORCED - NO VALID SETUP, LOW CONFIDENCE)",
+}
+
+
+def print_shortlist(candidates: list[Candidate], limit: int = 5) -> None:
+    pool = sorted(
+        candidates,
+        key=lambda c: (c.tier, -c.score, -c.rs_market, -c.rs_sector, -c.vwap_distance_atr, c.symbol, c.side),
+    )[:limit]
+    if not pool:
+        return
+    print("\nSHORTLIST (best tier first):")
+    for i, c in enumerate(pool, 1):
+        print(
+            f"  {i}. {c.symbol:<14} {c.side:<5} T{c.tier} score={c.score:6.2f} "
+            f"vwap={c.vwap_distance_atr:+.2f}ATR rs={c.rs_market:+.2f}% entry=₹{c.entry:.2f}"
+        )
 
 
 def print_candidate(title: str, c: Candidate | None) -> None:
@@ -84,7 +107,7 @@ def print_candidate(title: str, c: Candidate | None) -> None:
         return
     print(f"SYMBOL       : {c.symbol}")
     print(f"DIRECTION    : {c.side}")
-    print(f"TIER         : {c.tier} {'(STRICT)' if c.tier == 1 else '(FALLBACK)'}")
+    print(f"TIER         : {c.tier} {TIER_LABELS.get(c.tier, '(FALLBACK)')}")
     print(f"SCORE        : {c.score:.2f}/100")
     print(f"ENTRY/LTP    : ₹{c.entry:.4f}")
     print(f"STOP LOSS    : ₹{c.stop:.4f}")
@@ -139,6 +162,64 @@ def parse_universe(client: PsygridClient, raw: dict[str, dict], scan_time: datet
                 health=Health(symbol, False, f"parse_exception:{exc}"),
             )
     return parsed
+
+
+def precision_screen(
+    parsed: dict[str, StockData], cfg: StrategyConfig, scan_time: datetime
+) -> dict[str, StockData]:
+    """Mark stale or thinly traded stocks unhealthy before anything is scored.
+
+    Stale: the newest completed candle closed more than ``max_candle_age_minutes``
+    ago, so the stock is not trading now (or its feed lags).
+    Thin: the median rupee turnover of the last ``turnover_lookback_bars`` minutes
+    is below ``min_median_turnover_rupees``, so 1-minute geometry is mostly noise
+    and a fill at the printed price is unlikely.
+    """
+    minute = scan_time.astimezone(IST).replace(second=0, microsecond=0)
+    out: dict[str, StockData] = {}
+    for symbol, d in parsed.items():
+        if not d.health.healthy or not d.candles:
+            out[symbol] = d
+            continue
+        reasons: list[str] = []
+        if cfg.max_candle_age_minutes:
+            # Minutes since the newest candle closed: 0 when it is the minute just completed.
+            age = int((minute - d.candles[-1].ts.astimezone(IST)).total_seconds() // 60) - 1
+            if age > cfg.max_candle_age_minutes:
+                reasons.append(f"stale_last_candle_{age}m")
+        if cfg.min_median_turnover_rupees:
+            recent = d.candles[-cfg.turnover_lookback_bars:]
+            turnover = median(c.close * c.volume for c in recent)
+            if turnover < cfg.min_median_turnover_rupees:
+                reasons.append("thin_turnover")
+        out[symbol] = d if not reasons else StockData(
+            d.symbol, d.candles, d.ltp, d.previous_close, Health(symbol, False, ";".join(reasons))
+        )
+    return out
+
+
+def feed_is_live(meta: dict) -> tuple[bool, str]:
+    """The snapshot must come from a LIVE session; anything else is not tradable data."""
+    status = meta.get("status")
+    session = meta.get("session") if isinstance(meta.get("session"), dict) else {}
+    session_status = session.get("status")
+    if status not in (None, "OK"):
+        return False, f"feed status={status}"
+    if session_status not in (None, "LIVE"):
+        return False, f"session status={session_status}"
+    return True, ""
+
+
+def entry_trigger(c: Candidate, last: Candle) -> tuple[float, float]:
+    """(trigger, R multiple at the trigger): enter only on a break of the last candle.
+
+    SHORT arms below the last completed candle's low, LONG above its high, so
+    the order fills only if price is still moving the signal's way.
+    """
+    trigger = last.low if c.side == "SHORT" else last.high
+    risk = abs(trigger - c.stop)
+    reward = abs(c.target - trigger)
+    return trigger, (reward / risk if risk > 0 else 0.0)
 
 
 def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
@@ -234,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--expected-universe", type=int, default=EXPECTED_UNIVERSE, help="universe_size the feed must declare")
     parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds (default: strategy config)")
+    parser.add_argument("--risk-rupees", type=float, default=None, help="rupees you accept losing at the stop; prints the share quantity")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -277,6 +359,12 @@ def main(argv: list[str] | None = None) -> int:
         return 30
 
     meta = client.last_market_meta
+    live, why = feed_is_live(meta)
+    if not live:
+        print(f"FEED NOT LIVE: {why}. No signal from non-live data.")
+        audit.event("FEED_NOT_LIVE", reason=why)
+        return 33
+
     preflight_results = {
         ENDPOINT_PATH: {
             "ok": bool(raw),
@@ -290,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     audit.event("PREFLIGHT", ok=bool(raw), endpoint=ENDPOINT_PATH, results=preflight_results)
 
     scan_time = now_ist()
-    parsed = parse_universe(client, raw, scan_time)
+    parsed = precision_screen(parse_universe(client, raw, scan_time), cfg, scan_time)
     healthy = {s: d for s, d in parsed.items() if d.health.healthy}
     unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
 
@@ -340,16 +428,34 @@ def main(argv: list[str] | None = None) -> int:
 
     print_candidate("🏆 #1 BEST SIGNAL FROM AVAILABLE HEALTHY STOCKS", selected)
     selected_data = parsed.get(selected.symbol)
+    trigger = None
     if selected_data and selected_data.candles:
         latest_bar = selected_data.candles[-1]
         print(f"LATEST CANDLE: {latest_bar.ts:%Y-%m-%d %H:%M:%S %Z}")
         print(f"CANDLE COUNT : {len(selected_data.candles)}")
         print(f"LATEST CLOSE : ₹{latest_bar.close:.4f}")
-    print("\nSTATUS: SIGNAL_READY")
+        trigger, trigger_rr = entry_trigger(selected, latest_bar)
+        word = "BELOW" if selected.side == "SHORT" else "ABOVE"
+        print(f"TRIGGER      : enter only if price trades {word} ₹{trigger:.2f} "
+              f"(stop-entry order, {trigger_rr:.2f}R from there)")
+        print(f"               cancel if not filled within {cfg.trigger_valid_candles} candle(s) "
+              f"or if ₹{selected.stop:.2f} trades first")
+        if args.risk_rupees:
+            per_share = abs(trigger - selected.stop)
+            qty = int(args.risk_rupees // per_share) if per_share > 0 else 0
+            print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
+    print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
+    print_shortlist(candidates)
+    status = "SIGNAL_READY" if selected.tier < 3 else "LOW_CONFIDENCE_FORCED"
+    if selected.tier == 3:
+        print("\nWARNING: no stock passed the Tier 1/2 pattern gates. This is a forced pick:")
+        print("         skip it or trade minimum size.")
+    print(f"\nSTATUS: {status}")
     print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
     audit.event(
-        "SIGNAL_READY",
+        status,
+        trigger=trigger,
         scan_time=scan_time.isoformat(),
         universe=len(parsed),
         healthy=len(healthy),

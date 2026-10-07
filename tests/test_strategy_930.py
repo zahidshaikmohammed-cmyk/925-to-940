@@ -226,10 +226,18 @@ class StrategyTests(unittest.TestCase):
 
     def test_late_session_impulse_is_not_killed_by_old_bar_gate(self):
         cs = late_session_retrace_fixture()
-        gate_only_cfg = replace(self.cfg, max_impulse_atr=5.0, max_retracement_volume_ratio=2.0, min_persistence=0.40)
+        # This fixture closes ~4.4 ATR above VWAP; the VWAP stretch cap is relaxed
+        # here because this test is only about the old bar-index gate.
+        gate_only_cfg = replace(
+            self.cfg, max_impulse_atr=5.0, max_retracement_volume_ratio=2.0, min_persistence=0.40,
+            max_extension_from_vwap_atr=5.0,
+        )
         candidates = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], gate_only_cfg)
         self.assertTrue(candidates)
         self.assertTrue(any(c.tier == 1 for c in candidates), [c.reasons for c in candidates])
+        # With the default cap the same stretched close is never a Tier 1 setup.
+        default = evaluate_tiers("LATE", cs, cs[-1].close, None, 0.0, 0.0, [], replace(gate_only_cfg, max_extension_from_vwap_atr=2.0))
+        self.assertFalse(any(c.tier == 1 for c in default))
         strict = next(c for c in candidates if c.tier == 1)
         self.assertGreaterEqual(strict.retracement_depth, self.cfg.min_retracement_depth)
         self.assertLessEqual(strict.retracement_depth, self.cfg.max_retracement_depth)

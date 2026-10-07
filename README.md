@@ -47,6 +47,14 @@ Target distance = `max(2×risk, 1.5×ATR)`.
 
 These are research defaults, not a profitability guarantee; backtest and paper-test before live use.
 
+### Precision gates (`run_engine.py` / `bbbbb.py`)
+
+- **Live data only:** no signal unless the feed says `status: OK` and session `LIVE` (exit code 33).
+- **Per-stock screen:** a stock is skipped if its newest candle closed more than 3 minutes ago, or if its median rupee turnover per minute over the last 10 minutes is under ₹5 lakh.
+- **VWAP stretch cap:** Tier 1 and Tier 2 reject a close more than 2.0 ATR from VWAP (`max_extension_from_vwap_atr`, `fallback_extension_atr_max`). The VWAP score peaks at 1.0 ATR and decays to 0 at the cap.
+- **Trigger entry:** enter only on a break of the last completed candle's low (SHORT) or high (LONG), placed as a stop-entry order. Cancel it after 2 candles, or if the stop trades first. `--risk-rupees N` prints the share quantity.
+- **Tier 3 is labelled** `LOW_CONFIDENCE_FORCED`: no stock passed the pattern gates, so either skip the trade or trade minimum size.
+
 ## Run locally in PowerShell
 
 ```powershell

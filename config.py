@@ -36,6 +36,7 @@ class StrategyConfig:
     max_gap_z: float = 3.0
     max_impulse_atr: float = 3.50
     max_extension_from_vwap_atr: float = 2.00
+    vwap_sweet_spot_atr: float = 1.00  # VWAP score peaks here and decays toward the extension cap
     late_extreme_bar: int = 12
     exhaustion_reclaim_distance_atr: float = 0.35
 
@@ -70,8 +71,19 @@ class StrategyConfig:
     fallback_volume_ratio_max: float = 1.20
     fallback_efficiency_min: float = 0.30
     fallback_persistence_min: float = 0.45
-    fallback_extension_atr_max: float = 2.50
+    fallback_extension_atr_max: float = 2.00
     fallback_vwap_tolerance_atr: float = 0.25
+
+    # Precision screen (run_engine.precision_screen), applied before scoring.
+    # A stock is skipped when its newest completed candle is older than this
+    # (stale/illiquid feed), or when its typical minute turnover is too thin
+    # for a clean fill. 0 disables either check.
+    max_candle_age_minutes: int = 3
+    min_median_turnover_rupees: float = 500_000.0
+    turnover_lookback_bars: int = 10
+    # Entry trigger: the signal is armed at the last completed candle's
+    # low (SHORT) / high (LONG) and expires after this many candles.
+    trigger_valid_candles: int = 2
 
     def validate(self) -> None:
         weights = (
@@ -98,5 +110,9 @@ class StrategyConfig:
             raise ValueError("minimum_rr must be >= 1")
         if self.atr_period < 2:
             raise ValueError("atr_period must be >= 2")
+        if not 0 < self.vwap_sweet_spot_atr < self.max_extension_from_vwap_atr - 0.25:
+            raise ValueError("vwap_sweet_spot_atr must sit below max_extension_from_vwap_atr - 0.25")
+        if self.max_candle_age_minutes < 0 or self.min_median_turnover_rupees < 0:
+            raise ValueError("precision screen thresholds must be >= 0")
         if self.http_timeout_seconds <= 0:
             raise ValueError("http_timeout_seconds must be > 0")

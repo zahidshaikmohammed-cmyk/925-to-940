@@ -105,6 +105,17 @@ class FeedAndTriggerTests(unittest.TestCase):
         self.assertAlmostEqual((target - trigger) / (trigger - c.stop), 2.0)
 
 
+class SignalStatusTests(unittest.TestCase):
+    def make(self, tier, score):
+        return Candidate("X", "LONG", score, 100, 99, 102, 0, 0, 0, 0.5, 0.5, 0, 0, 0, 0, 1, 99, tier, ())
+
+    def test_status_depends_on_tier_and_score(self):
+        cfg = StrategyConfig()
+        self.assertEqual(run_engine.signal_status(self.make(1, 80), cfg), "SIGNAL_READY")
+        self.assertEqual(run_engine.signal_status(self.make(2, 39.75), cfg), "LOW_CONFIDENCE_WEAK")  # BHARTIARTL 11:38
+        self.assertEqual(run_engine.signal_status(self.make(3, 73.3), cfg), "LOW_CONFIDENCE_FORCED")  # MTARTECH 11:38
+
+
 class NotLiveFeedClient(PsygridClient):
     def market(self):
         self.last_market_errors = ()

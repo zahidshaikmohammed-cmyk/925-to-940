@@ -53,7 +53,7 @@ These are research defaults, not a profitability guarantee; backtest and paper-t
 - **Per-stock screen:** a stock is skipped if its newest candle closed more than 3 minutes ago, or if its median rupee turnover per minute over the last 10 minutes is under ₹5 lakh.
 - **VWAP stretch cap:** Tier 1 and Tier 2 reject a close more than 2.0 ATR from VWAP (`max_extension_from_vwap_atr`, `fallback_extension_atr_max`). The VWAP score peaks at 1.0 ATR and decays to 0 at the cap.
 - **Trigger entry:** enter only on a break of the last completed candle's low (SHORT) or high (LONG), placed as a stop-entry order. Cancel it after 2 candles, or if the stop trades first. The target is re-measured from the trigger so the trade stays 2R. `--risk-rupees N` prints the share quantity; `--min-turnover N` changes the ₹5 lakh/min liquidity floor (0 = off).
-- **Tier 3 is labelled** `LOW_CONFIDENCE_FORCED`: no stock passed the pattern gates, so either skip the trade or trade minimum size.
+- **Status:** `SIGNAL_READY` only for a Tier 1/2 setup scoring ≥ 55; a weaker one is `LOW_CONFIDENCE_WEAK`. Tier 3 scores use a looser formula and are not comparable (shown as `forced=`); Tier 3 is labelled `LOW_CONFIDENCE_FORCED`: no stock passed the pattern gates, so either skip the trade or trade minimum size.
 
 ## Run locally in PowerShell
 

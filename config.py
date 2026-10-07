@@ -84,6 +84,8 @@ class StrategyConfig:
     # Entry trigger: the signal is armed at the last completed candle's
     # low (SHORT) / high (LONG) and expires after this many candles.
     trigger_valid_candles: int = 2
+    # A Tier 1/2 pick below this score is reported LOW_CONFIDENCE_WEAK, not SIGNAL_READY.
+    min_signal_score: float = 55.0
 
     def validate(self) -> None:
         weights = (

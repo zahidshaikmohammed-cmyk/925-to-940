@@ -83,6 +83,19 @@ TIER_LABELS = {
 }
 
 
+def signal_status(c: Candidate, cfg: StrategyConfig) -> str:
+    """SIGNAL_READY only for a Tier 1/2 setup scoring at least ``min_signal_score``.
+
+    Tier 3 "forced" scores come from a looser formula (it credits even negative
+    relative strength) and are not comparable with Tier 1/2 scores.
+    """
+    if c.tier >= 3:
+        return "LOW_CONFIDENCE_FORCED"
+    if c.score < cfg.min_signal_score:
+        return "LOW_CONFIDENCE_WEAK"
+    return "SIGNAL_READY"
+
+
 def print_shortlist(candidates: list[Candidate], limit: int = 5) -> None:
     pool = sorted(
         candidates,
@@ -93,7 +106,8 @@ def print_shortlist(candidates: list[Candidate], limit: int = 5) -> None:
     print("\nSHORTLIST (best tier first):")
     for i, c in enumerate(pool, 1):
         print(
-            f"  {i}. {c.symbol:<14} {c.side:<5} T{c.tier} score={c.score:6.2f} "
+            f"  {i}. {c.symbol:<14} {c.side:<5} T{c.tier} "
+            f"{'forced' if c.tier == 3 else 'score '}={c.score:6.2f} "
             f"vwap={c.vwap_distance_atr:+.2f}ATR rs={c.rs_market:+.2f}% entry=₹{c.entry:.2f}"
         )
 
@@ -454,10 +468,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
     print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
     print_shortlist(candidates)
-    status = "SIGNAL_READY" if selected.tier < 3 else "LOW_CONFIDENCE_FORCED"
-    if selected.tier == 3:
+    status = signal_status(selected, cfg)
+    if status == "LOW_CONFIDENCE_FORCED":
         print("\nWARNING: no stock passed the Tier 1/2 pattern gates. This is a forced pick:")
         print("         skip it or trade minimum size.")
+    elif status == "LOW_CONFIDENCE_WEAK":
+        print(f"\nWARNING: best real setup scores {selected.score:.1f} < {cfg.min_signal_score:.0f}. "
+              "Weak edge: skip it or trade minimum size.")
     print(f"\nSTATUS: {status}")
     print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")

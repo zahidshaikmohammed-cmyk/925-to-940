@@ -87,6 +87,10 @@ class PrecisionScreenTests(unittest.TestCase):
         self.assertFalse(out["THIN"].health.healthy)
         self.assertIn("thin_turnover", out["THIN"].health.reason)
 
+    def test_order_size_is_measured_in_minutes_of_turnover(self):
+        candles = bars(30, price=100.0, volume=1_000)  # ₹1 lakh per minute
+        self.assertAlmostEqual(run_engine.order_minutes_of_turnover(250_000, candles, self.cfg), 2.5)
+
     def test_checks_can_be_disabled(self):
         cfg = replace(self.cfg, max_candle_age_minutes=0, min_median_turnover_rupees=0.0)
         stale_thin = bars(30, volume=10, end=NOW - timedelta(minutes=30))

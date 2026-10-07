@@ -81,8 +81,12 @@ class StrategyConfig:
     # (stale/illiquid feed), or when its typical minute turnover is too thin
     # for a clean fill. 0 disables either check.
     max_candle_age_minutes: int = 3
-    min_median_turnover_rupees: float = 500_000.0
-    turnover_lookback_bars: int = 10
+    # ₹2 lakh/min over a 30-minute median: a 10-minute median at ₹5 lakh flipped
+    # liquid mid-caps (360ONE, 2026-10-07) in and out of the scan at midday.
+    min_median_turnover_rupees: float = 200_000.0
+    turnover_lookback_bars: int = 30
+    # Warn when the order is bigger than this many minutes of the stock's median turnover.
+    max_order_minutes_of_turnover: float = 1.0
     # Entry trigger: the signal is armed at the last completed candle's
     # low (SHORT) / high (LONG) and expires after this many candles.
     trigger_valid_candles: int = 2

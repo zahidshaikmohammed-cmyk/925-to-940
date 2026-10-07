@@ -214,6 +214,13 @@ def precision_screen(
     return out
 
 
+def order_minutes_of_turnover(notional: float, candles, cfg: StrategyConfig) -> float:
+    """How many minutes of the stock's median rupee turnover an order of ``notional`` equals."""
+    recent = candles[-cfg.turnover_lookback_bars:]
+    typical = median(c.close * c.volume for c in recent) if recent else 0.0
+    return notional / typical if typical > 0 else float("inf")
+
+
 def feed_is_live(meta: dict) -> tuple[bool, str]:
     """The snapshot must come from a LIVE session; anything else is not tradable data."""
     status = meta.get("status")
@@ -610,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
             per_share = abs(trigger - selected.stop)
             qty = int(args.risk_rupees // per_share) if per_share > 0 else 0
             print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
+            minutes = order_minutes_of_turnover(qty * trigger, selected_data.candles, cfg)
+            note = "" if minutes <= cfg.max_order_minutes_of_turnover else "  <- large for this stock: expect slippage, split the order"
+            print(f"LIQUIDITY    : order ₹{qty * trigger / 1e5:.1f} lakh = {minutes:.1f} min of its median turnover{note}")
         fill_time = max(scan_time, latest_bar.ts.astimezone(IST) + timedelta(minutes=1))
         timing = exit_timing(selected, selected_data.candles, trigger, trigger_target, fill_time, cfg)
         print_exit_timing(timing, fill_time)

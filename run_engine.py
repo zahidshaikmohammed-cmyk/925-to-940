@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
-from dataclasses import asdict, replace
-from datetime import datetime, time as dtime
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, time as dtime, timedelta
+from math import ceil
 from pathlib import Path
 from statistics import median
 from zoneinfo import ZoneInfo
@@ -239,6 +240,78 @@ def entry_trigger(c: Candidate, last: Candle, cfg: StrategyConfig) -> tuple[floa
     return trigger, target
 
 
+def directional_pace(candles, side: int, cfg: StrategyConfig) -> float:
+    """Rupees per minute of the stock's fastest sustained move in the trade's direction.
+
+    The best 5-15 bar net close-to-close move (per bar) over the last
+    ``pace_lookback_bars``: the momentum the setup is betting continues.
+    0.0 when the stock has no move in that direction.
+    """
+    closes = [c.close for c in candles[-cfg.pace_lookback_bars:]]
+    best = 0.0
+    for k in range(5, 16):
+        for j in range(k, len(closes)):
+            best = max(best, side * (closes[j] - closes[j - k]) / k)
+    return best
+
+
+@dataclass(frozen=True)
+class ExitTiming:
+    pace: float              # expected rupees/minute toward the target
+    checkpoint_minutes: int  # by now price should be at +0.5R, else momentum failed
+    target_minutes: int      # expected minutes to reach the target at that pace
+    time_stop_minutes: int   # exit at market if neither SL nor TP has traded
+    checkpoint_price: float
+    capped_by_close: bool
+
+
+def exit_timing(c: Candidate, candles, entry: float, target: float, start: datetime,
+                cfg: StrategyConfig) -> ExitTiming | None:
+    """Time the trade from the stock's own momentum, not a fixed 30/60 minutes.
+
+    At the expected pace (``continuation_pace_ratio`` x its fastest recent run):
+    the +0.5R checkpoint is due after ``checkpoint_slack`` x the minutes to cover
+    0.5R, the target after distance / pace, and the time stop at
+    ``time_stop_multiple`` x that. Nothing runs past ``intraday_exit_time``.
+    None when the stock has no measurable move in the trade's direction.
+    """
+    side = -1 if c.side == "SHORT" else 1
+    pace = cfg.continuation_pace_ratio * directional_pace(candles, side, cfg)
+    risk = abs(entry - c.stop)
+    if pace <= 0 or risk <= 0:
+        return None
+    half_r = 0.5 * risk
+    checkpoint = max(2, ceil(cfg.checkpoint_slack * half_r / pace))
+    to_target = max(3, ceil(abs(target - entry) / pace))
+    time_stop = max(to_target + 1, ceil(cfg.time_stop_multiple * to_target))
+    hh, mm = (int(x) for x in cfg.intraday_exit_time.split(":"))
+    close = start.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    left = max(0, int((close - start).total_seconds() // 60))
+    capped = time_stop > left
+    return ExitTiming(
+        pace=pace,
+        checkpoint_minutes=min(checkpoint, left),
+        target_minutes=min(to_target, left),
+        time_stop_minutes=min(time_stop, left),
+        checkpoint_price=entry + side * half_r,
+        capped_by_close=capped,
+    )
+
+
+def print_exit_timing(timing: ExitTiming | None, start: datetime) -> None:
+    if timing is None:
+        print("EXIT TIMING  : no measurable momentum in the trade's direction -> skip this trade")
+        return
+    at = lambda m: (start + timedelta(minutes=m)).strftime("%H:%M")
+    print(f"EXIT TIMING  : pace ≈ ₹{timing.pace:.2f}/min (half of this stock's fastest recent run)")
+    print(f"  CHECKPOINT : by +{timing.checkpoint_minutes} min (~{at(timing.checkpoint_minutes)}) price must reach "
+          f"₹{timing.checkpoint_price:.2f} (+0.5R), else exit: momentum failed")
+    print(f"  TARGET ETA : ~{timing.target_minutes} min (~{at(timing.target_minutes)})")
+    print(f"  TIME STOP  : exit at market after {timing.time_stop_minutes} min (~{at(timing.time_stop_minutes)}) "
+          f"if neither SL nor TP traded" + (" [capped at the intraday exit time]" if timing.capped_by_close else ""))
+    print("  (minutes count from the fill; clock times assume a fill now)")
+
+
 def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
     healthy = {
         symbol: d for symbol, d in data.items()
@@ -466,6 +539,10 @@ def main(argv: list[str] | None = None) -> int:
             per_share = abs(trigger - selected.stop)
             qty = int(args.risk_rupees // per_share) if per_share > 0 else 0
             print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
+        fill_time = max(scan_time, latest_bar.ts.astimezone(IST) + timedelta(minutes=1))
+        print_exit_timing(
+            exit_timing(selected, selected_data.candles, trigger, trigger_target, fill_time, cfg), fill_time
+        )
     print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
     print_shortlist(candidates)
     status = signal_status(selected, cfg)

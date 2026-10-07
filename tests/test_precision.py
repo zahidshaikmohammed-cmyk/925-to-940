@@ -116,6 +116,49 @@ class SignalStatusTests(unittest.TestCase):
         self.assertEqual(run_engine.signal_status(self.make(3, 73.3), cfg), "LOW_CONFIDENCE_FORCED")  # MTARTECH 11:38
 
 
+def trend(per_bar: float, count: int = 40, price: float = 100.0) -> tuple[Candle, ...]:
+    start = datetime(2026, 10, 7, 9, 15, tzinfo=IST)
+    out = []
+    for i in range(count):
+        o = price + per_bar * i
+        c = o + per_bar
+        out.append(Candle(start + timedelta(minutes=i), o, max(o, c) + 0.05, min(o, c) - 0.05, c, 50_000))
+    return tuple(out)
+
+
+class ExitTimingTests(unittest.TestCase):
+    def long(self, entry=110.0, stop=109.0):
+        return Candidate("X", "LONG", 70, entry, stop, entry + 2 * (entry - stop), 0, 0, 0, 0.5, 0.5,
+                         0, 0, 0, 0, 0.2, stop, 1, ())
+
+    def test_pace_is_the_stocks_own_fastest_run(self):
+        cfg = StrategyConfig()
+        self.assertAlmostEqual(run_engine.directional_pace(trend(0.10), 1, cfg), 0.10)
+        self.assertEqual(run_engine.directional_pace(trend(0.10), -1, cfg), 0.0)
+
+    def test_a_faster_stock_gets_a_shorter_clock(self):
+        cfg = StrategyConfig()
+        start = datetime(2026, 10, 7, 10, 0, tzinfo=IST)
+        c = self.long()
+        slow = run_engine.exit_timing(c, trend(0.05), 110.0, 112.0, start, cfg)
+        fast = run_engine.exit_timing(c, trend(0.20), 110.0, 112.0, start, cfg)
+        # pace = 0.5 x run: 0.025 and 0.10 rupees/min; 2 rupees to target -> 80 and 20 minutes
+        self.assertEqual((slow.target_minutes, fast.target_minutes), (80, 20))
+        self.assertEqual((slow.time_stop_minutes, fast.time_stop_minutes), (160, 40))
+        self.assertEqual(fast.checkpoint_minutes, 8)  # 1.5 x (0.5 rupees / 0.10 per min)
+        self.assertEqual(fast.checkpoint_price, 110.5)
+
+    def test_never_past_the_intraday_exit(self):
+        late = datetime(2026, 10, 7, 15, 0, tzinfo=IST)
+        t = run_engine.exit_timing(self.long(), trend(0.05), 110.0, 112.0, late, StrategyConfig())
+        self.assertEqual(t.time_stop_minutes, 15)
+        self.assertTrue(t.capped_by_close)
+
+    def test_no_momentum_in_the_trade_direction_means_no_clock(self):
+        start = datetime(2026, 10, 7, 10, 0, tzinfo=IST)
+        self.assertIsNone(run_engine.exit_timing(self.long(), trend(-0.1), 110.0, 112.0, start, StrategyConfig()))
+
+
 class NotLiveFeedClient(PsygridClient):
     def market(self):
         self.last_market_errors = ()

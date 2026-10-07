@@ -84,6 +84,14 @@ class StrategyConfig:
     # Entry trigger: the signal is armed at the last completed candle's
     # low (SHORT) / high (LONG) and expires after this many candles.
     trigger_valid_candles: int = 2
+    # Exit timing (run_engine.exit_timing), measured from the stock's own pace:
+    # the fastest sustained directional run (5-15 bars) in the last 36 bars,
+    # scaled by continuation_pace_ratio because a second leg is usually slower.
+    pace_lookback_bars: int = 36
+    continuation_pace_ratio: float = 0.5
+    checkpoint_slack: float = 1.5   # x the expected minutes to reach +0.5R
+    time_stop_multiple: float = 2.0  # x the expected minutes to reach the target
+    intraday_exit_time: str = "15:15"
     # A Tier 1/2 pick below this score is reported LOW_CONFIDENCE_WEAK, not SIGNAL_READY.
     min_signal_score: float = 55.0
 

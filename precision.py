@@ -251,6 +251,16 @@ def entry_window(now: datetime, cfg: StrategyConfig) -> tuple[bool, str, float]:
     return True, "", 0.0
 
 
+def day_move_pct(candles: Sequence[Candle], c: Candidate) -> float:
+    """Today's move in the trade's direction, from the previous close when known (else the open)."""
+    cs = session_candles(candles)
+    if not cs or cs[0].open <= 0:
+        return 0.0
+    side = -1 if c.side == "SHORT" else 1
+    from_prev_close = (1.0 + c.gap_pct / 100.0) * (cs[-1].close / cs[0].open) - 1.0
+    return side * 100.0 * from_prev_close
+
+
 def conviction(c: Candidate, p: Persistence, cfg: StrategyConfig) -> float:
     return cfg.conviction_setup_weight * c.score + (1.0 - cfg.conviction_setup_weight) * p.score
 
@@ -276,6 +286,9 @@ def rank_picks(
         candles = candles_by_symbol.get(c.symbol) or ()
         p = persistence(candles, c.side, c.rs_market, c.rs_sector, has_sector.get(c.symbol, False), cfg)
         blockers: list[str] = []
+        moved = day_move_pct(candles, c)
+        if moved >= cfg.max_day_move_pct:
+            blockers.append(f"already_moved_{moved:+.1f}%_today")
         if not allowed:
             blockers.append(window_reason)
         if not breadth.allows(c.side):

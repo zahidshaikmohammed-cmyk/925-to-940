@@ -19,6 +19,7 @@ IST = ZoneInfo("Asia/Kolkata")
 BASE_URL = "http://140.245.226.102:10000"
 # The two-node PSYGRID Live Core: same /public/live.json contract, 989-stock universe (bbbbb.py uses it).
 LIVE_CORE_URL = "http://129.225.112.47:10000"
+LAST_STATUS: str | None = None  # status of the latest main() scan (read by bbbbb_plus)
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
@@ -395,6 +396,28 @@ def final_status(selected: Candidate, pick: Pick | None) -> str:
     return "NO_PRECISION_SETUP"
 
 
+NO_TRADE_REASONS = {
+    "NO_PRECISION_SETUP": "no stock passes every precision rule right now",
+    "NO_NEW_ENTRIES": "outside the entry window",
+    "LOW_CONFIDENCE_FORCED": "no Tier 1/2 setup anywhere in the scanned universe",
+}
+
+
+def print_no_trade(status: str, selected: Candidate, pick: Pick | None) -> None:
+    """No trade plan is printed for a stock that must not be traded."""
+    print("\n" + "=" * 96)
+    print(f"⛔ NO TRADE NOW: {NO_TRADE_REASONS[status]}")
+    print("=" * 96)
+    closest = f"{selected.symbol} {selected.side} (Tier {selected.tier}"
+    if pick is not None:
+        closest += f", conviction {pick.conviction:.0f}, persistence {pick.persistence.score:.0f})"
+        print(f"CLOSEST      : {closest}")
+        print(f"BLOCKED BY   : {' | '.join(pick.blockers)}")
+    else:
+        print(f"CLOSEST      : {closest}, forced pick: not a setup)")
+    print("ACTION       : do nothing. Rerun bbbbb.py in a few minutes.")
+
+
 def print_breadth(b: Breadth) -> None:
     print(f"MARKET       : {b.above_vwap * 100:.0f}% of {b.counted} liquid stocks above VWAP -> {b.regime}")
 
@@ -589,48 +612,47 @@ def main(argv: list[str] | None = None) -> int:
     status = final_status(selected, pick)
 
     print_breadth(breadth)
-    title = {
-        "SIGNAL_READY": "🏆 #1 PRECISION SIGNAL",
-        "NO_PRECISION_SETUP": "⛔ NO PRECISION SETUP NOW - closest candidate (DO NOT TRADE)",
-        "NO_NEW_ENTRIES": "⛔ OUTSIDE THE ENTRY WINDOW - closest candidate (DO NOT TRADE)",
-        "LOW_CONFIDENCE_FORCED": "⚠ FORCED PICK - no Tier 1/2 setup anywhere (DO NOT TRADE at size)",
-    }[status]
-    print_candidate(title, selected)
-    if pick is not None:
-        print_persistence(pick)
+    ready = status == "SIGNAL_READY"
     selected_data = parsed.get(selected.symbol)
     trigger = trigger_target = None
     timing = None
     if selected_data and selected_data.candles:
+        # Computed for every status so grade_signals.py can also grade the near-misses.
         latest_bar = selected_data.candles[-1]
-        print(f"LATEST CANDLE: {latest_bar.ts:%Y-%m-%d %H:%M:%S %Z}")
-        print(f"CANDLE COUNT : {len(selected_data.candles)}")
-        print(f"LATEST CLOSE : ₹{latest_bar.close:.4f}")
         trigger, trigger_target = entry_trigger(selected, latest_bar, cfg)
-        word = "BELOW" if selected.side == "SHORT" else "ABOVE"
-        print(f"TRIGGER      : enter only if price trades {word} ₹{trigger:.2f} (stop-entry order)")
-        print(f"TRIGGER PLAN : SL ₹{selected.stop:.2f} | TP ₹{trigger_target:.2f} "
-              f"({abs(trigger_target - trigger) / max(abs(trigger - selected.stop), 1e-12):.2f}R from the trigger)")
-        print(f"               cancel if not filled within {cfg.trigger_valid_candles} candle(s) "
-              f"or if ₹{selected.stop:.2f} trades first")
-        if args.risk_rupees:
-            per_share = abs(trigger - selected.stop)
-            qty = int(args.risk_rupees // per_share) if per_share > 0 else 0
-            print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
-            minutes = order_minutes_of_turnover(qty * trigger, selected_data.candles, cfg)
-            note = "" if minutes <= cfg.max_order_minutes_of_turnover else "  <- large for this stock: expect slippage, split the order"
-            print(f"LIQUIDITY    : order ₹{qty * trigger / 1e5:.1f} lakh = {minutes:.1f} min of its median turnover{note}")
         fill_time = max(scan_time, latest_bar.ts.astimezone(IST) + timedelta(minutes=1))
         timing = exit_timing(selected, selected_data.candles, trigger, trigger_target, fill_time, cfg)
-        print_exit_timing(timing, fill_time)
-    print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
+
+    if ready:
+        print_candidate("🏆 #1 PRECISION SIGNAL", selected)
+        print_persistence(pick)
+        if selected_data and selected_data.candles:
+            print(f"LATEST CANDLE: {latest_bar.ts:%Y-%m-%d %H:%M:%S %Z}")
+            print(f"CANDLE COUNT : {len(selected_data.candles)}")
+            print(f"LATEST CLOSE : ₹{latest_bar.close:.4f}")
+            word = "BELOW" if selected.side == "SHORT" else "ABOVE"
+            print(f"TRIGGER      : enter only if price trades {word} ₹{trigger:.2f} (stop-entry order)")
+            print(f"TRIGGER PLAN : SL ₹{selected.stop:.2f} | TP ₹{trigger_target:.2f} "
+                  f"({abs(trigger_target - trigger) / max(abs(trigger - selected.stop), 1e-12):.2f}R from the trigger)")
+            print(f"               cancel if not filled within {cfg.trigger_valid_candles} candle(s) "
+                  f"or if ₹{selected.stop:.2f} trades first")
+            if args.risk_rupees:
+                per_share = abs(trigger - selected.stop)
+                qty = int(args.risk_rupees // per_share) if per_share > 0 else 0
+                print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
+                minutes = order_minutes_of_turnover(qty * trigger, selected_data.candles, cfg)
+                note = "" if minutes <= cfg.max_order_minutes_of_turnover else "  <- large for this stock: expect slippage, split the order"
+                print(f"LIQUIDITY    : order ₹{qty * trigger / 1e5:.1f} lakh = {minutes:.1f} min of its median turnover{note}")
+            print_exit_timing(timing, fill_time)
+        print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
+    else:
+        print_no_trade(status, selected, pick)
     print_picks(picks)
     if not picks:
         print_shortlist(candidates)
+    global LAST_STATUS
+    LAST_STATUS = status
     print(f"\nSTATUS: {status}")
-    if status != "SIGNAL_READY":
-        print("ACTION: no trade. Rerun in a few minutes; a precision signal needs a Tier 1/2 setup,")
-        print("        the market on its side, and a trend that is holding (persistence).")
     print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
     audit.event(

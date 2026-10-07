@@ -30,7 +30,7 @@ def series(steps, start_price=100.0, volume=10_000, start=START):
 
 def uptrend(n=90):
     # steady climb with shallow pullbacks every 5th minute
-    return series([0.12 if i % 5 else -0.05 for i in range(n)])
+    return series([0.06 if i % 5 else -0.025 for i in range(n)])  # about +4% on the day
 
 
 def chop(n=90):
@@ -101,6 +101,15 @@ class PickTests(unittest.TestCase):
         picks = rank_picks([cand("DOWN", "SHORT")], self.candles, self.sector,
                            Breadth(0.75, 10, "LONG_ONLY"), self.morning, self.cfg)
         self.assertIn("against_market_LONG_ONLY", picks[0].blockers)
+
+    def test_a_stock_already_up_7_percent_is_not_bought(self):
+        runner = series([0.25] * 40)  # +10% on the day
+        picks = rank_picks([cand("RUN")], {"RUN": runner}, {"RUN": True},
+                           Breadth(0.7, 10, "LONG_ONLY"), self.morning, self.cfg)
+        self.assertTrue(any(b.startswith("already_moved_+10.0%") for b in picks[0].blockers), picks[0].blockers)
+        gapped = replace(cand("UP"), gap_pct=12.0)  # NELCAST-style: the gap counts too
+        picks = rank_picks([gapped], self.candles, self.sector, Breadth(0.7, 10, "LONG_ONLY"), self.morning, self.cfg)
+        self.assertTrue(any(b.startswith("already_moved_") for b in picks[0].blockers))
 
     def test_entry_window(self):
         day = datetime(2026, 10, 7, tzinfo=IST)

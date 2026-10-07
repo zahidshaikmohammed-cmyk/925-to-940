@@ -63,7 +63,11 @@ class SameEngineTests(unittest.TestCase):
         self.assertEqual((code_a, code_b), (0, 0))
         strip = lambda text: [l for l in text.splitlines() if not l.startswith("SCAN TIME")]
         self.assertEqual(strip(plus)[:len(strip(plain))], strip(plain))
-        self.assertIn("EXIT PLAN (bbbbb_plus)", plus)
+        if run_engine.LAST_STATUS == "SIGNAL_READY":
+            self.assertIn("EXIT PLAN (bbbbb_plus)", plus)
+        else:
+            self.assertNotIn("EXIT PLAN (bbbbb_plus)", plus)
+            self.assertIn("NO TRADE NOW", plus)
 
     def test_selected_trade_is_identical(self):
         with contextlib.redirect_stdout(io.StringIO()):

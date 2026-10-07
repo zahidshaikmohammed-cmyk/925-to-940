@@ -122,6 +122,9 @@ class StrategyConfig:
     p_opening_range: float = 0.15
     p_relative_strength: float = 0.15
     min_trend_persistence: float = 60.0
+    # No new entry in a stock that has already moved this much today in the trade's
+    # direction (NELCAST +17% offered as a LONG at 14:01): the easy part is gone.
+    max_day_move_pct: float = 7.0
     neutral_extra_persistence: float = 10.0
     lunch_extra_persistence: float = 10.0
     no_entry_before: str = "09:20"

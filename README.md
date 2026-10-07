@@ -1,5 +1,11 @@
 # 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 
+> **945 continuous scan:** `python 945.py` now rescans every stock once a minute from 09:30
+> and beeps only on a confirmed Tier 1 setup that still pays after costs. It tracks the
+> trade, keeps a journal in `data/scan/`, and can replay saved sessions with
+> `python 945.py --scan-replay data/sessions`. See RUNBOOK.md. The original 09:45 single
+> decision is `python 945.py --daemon`.
+
 Local Python engine for NSE cash equities. **Psygrid remains the live data source; this repository performs the strategy mathematics locally and ignores Psygrid's precomputed indicators.**
 
 ## Exact operating sequence

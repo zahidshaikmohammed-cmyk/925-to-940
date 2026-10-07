@@ -32,9 +32,12 @@ def replay_day(raw, index: HistoryIndex, cfg: SetupConfig, cost_pct: float):
     """The live path on a saved day: 1-minute triggers, 5-minute arming, every minute."""
     day = raw.session_date
     base: dict[str, Baseline] = index.baselines(day)
+    from .setups import EMPTY_BASE
     for sym, s in raw.stocks.items():
         if sym in base and s.previous_close:
             base[sym] = replace(base[sym], prev_close=s.previous_close)
+        elif sym not in base:
+            base[sym] = replace(EMPTY_BASE, prev_close=s.previous_close)
     end = datetime.combine(day, time(15, 31), IST)
     one = {sym: [(s.ts[i], s.o[i], s.h[i], s.l[i], s.c[i], s.v[i]) for i in range(len(s))]
            for sym, s in raw.stocks.items() if len(s)}
@@ -74,18 +77,19 @@ def _hm(iso):
 def audit(raw, index: HistoryIndex, cfg: SetupConfig, cost_pct: float, live_journal: Path) -> str:
     day = raw.session_date
     eng, base, bars = replay_day(raw, index, cfg, cost_pct)
-    liquid = [s for s in bars if s in base and (base[s].turnover_5m or 0) >= cfg.min_turnover_5m]
+    liquid = [s for s, b in bars.items() if b.ts and
+              SetupEngine._turnover(b, base[s], len(b.ts)) >= cfg.min_turnover_5m]
     L = ["=" * 88, f"945 SETUP AUDIT  {day}", "=" * 88]
 
     # 1. coverage
-    no_hist = sorted(s for s in raw.stocks if s not in base)
+    no_hist = sorted(s for s in raw.stocks if not base.get(s) or not base[s].days)
     L += ["", "1. COVERAGE",
           f"   feed stocks {len(raw.stocks)} | with 14-day history {len(raw.stocks) - len(no_hist)} | "
           f"liquid enough (>= Rs {cfg.min_turnover_5m / 1e5:.0f} lakh per 5-min bar) {len(liquid)}",
-          f"   median RVOL at 09:20: {eng.diag.get('orb_median_rvol', 'n/a')} "
+          f"   ORB mode: {eng.diag.get('orb_mode', 'n/a')} | median RVOL at 09:20: {eng.diag.get('orb_median_rvol', 'n/a')} "
           f"(near 1.0 = Yahoo history and the feed count volume the same way)"]
     if no_hist:
-        L.append(f"   no history, never scanned for setups ({len(no_hist)}): {', '.join(no_hist[:15])}"
+        L.append(f"   no history yet, scanned with day-one proxies ({len(no_hist)}): {', '.join(no_hist[:15])}"
                  f"{' ...' if len(no_hist) > 15 else ''}")
 
     # 2. setups found by the replay

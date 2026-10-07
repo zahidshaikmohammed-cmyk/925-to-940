@@ -281,10 +281,11 @@ class CliTests(unittest.TestCase):
         mod.bootstrap = lambda syms, out, say=print: (save_history(Path(out) / "yahoo_5m.json.gz",
                                                                    {s: hist[s] for s in syms}, {}),
                                                       Path(out) / "yahoo_5m.json.gz")[1]
+        mod.probe_yahoo = lambda: True
         with tempfile.TemporaryDirectory() as tmp:
             code, out = self.run_cli(mod, ["--data-dir", tmp, "--setup-backtest"])
             self.assertEqual(code, 50)
-            self.assertIn("--bootstrap", out)
+            self.assertIn("needs 11+", out)
             code, out = self.run_cli(mod, ["--data-dir", tmp, "--bootstrap"])
             self.assertEqual(code, 0, out)
             self.assertIn("40 symbols", out)
@@ -342,10 +343,11 @@ class CliTests(unittest.TestCase):
         mod.now, mod.sleep, mod.fetch = feed.now, feed.sleep, feed.fetch
         mod.is_trading_day = lambda d: True
         mod.beep = mod.alert_beep = lambda: None
+        mod.probe_yahoo = lambda: False
         mod.scan_config = lambda args: replace(TEST_CFG, stop_scanning=time(9, 31))
         with tempfile.TemporaryDirectory() as tmp:
             code, out = self.run_cli(mod, ["--data-dir", tmp, "--no-archive"])
-            self.assertIn("SETUPS OFF", out)
+            self.assertIn("DAY-ONE MODE", out)
             code, out = self.run_cli(mod, ["--data-dir", tmp, "--no-archive", "--no-setups"])
             self.assertNotIn("SETUPS", out)
 
@@ -492,7 +494,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual([t.symbol for t in eng.trades if t.setup == "ORB"], [])
         miss = {n["symbol"]: n["failed"] for n in eng.near if n["setup"] == "ORB"}
         self.assertEqual(miss.get("S000"), "candle body")
-        self.assertEqual(miss.get("S001"), "top-RVOL rank")
+        self.assertEqual(miss.get("S001"), "top rank")
 
     def test_live_uses_the_feeds_previous_close_and_warns_on_volume_scale(self):
         from intelligence.selector_data import Series
@@ -510,3 +512,78 @@ class ReviewFixTests(unittest.TestCase):
             self.assertGreater(live.engine.diag["orb_median_rvol"], 2.5)     # 5 x 50k vs ~50k history
             self.assertIn("VOLUME CHECK", live.rvol_warning())
             self.assertIsNone(live.rvol_warning())                            # said once
+
+
+class FeedOnlyTests(unittest.TestCase):
+    """Only the PSYGRID feed is reachable: history comes from saved sessions, and the
+    setups run on day-one proxies until it exists."""
+
+    def load(self):
+        spec = importlib.util.spec_from_file_location("psygrid_945_feedonly", ROOT / "945.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def write_sessions(self, folder, days, n=40):
+        import gzip
+        folder.mkdir(parents=True, exist_ok=True)
+        for i, d in enumerate(days):
+            p = make_payload(n, session=d, minutes=375, seed=100 + i, broken=False)
+            (folder / f"{d.isoformat()}.json.gz").write_bytes(
+                gzip.compress(json.dumps({"stocks_payload": p, "index_payload": None}).encode()))
+
+    def test_history_is_built_from_saved_sessions(self):
+        from intelligence.history import sessions_history, merge_history
+        days = trading_days(3)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_sessions(Path(tmp), days, n=5)
+            h = sessions_history(tmp)
+            self.assertEqual(len(h), 5)
+            bars = h["STK0000"]
+            self.assertEqual(len(bars), 3 * 75)
+            self.assertEqual(bars[0][0].time(), time(9, 15))
+            self.assertEqual(sessions_history(tmp, before=days[-1])["STK0000"][-1][0].date(), days[-2])
+            # a later source wins for a day both have
+            other = {"STK0000": [(bars[0][0], 1, 1, 1, 1, 1)]}
+            merged = merge_history(other, h)
+            self.assertEqual(len(merged["STK0000"]), 3 * 75)
+
+    def test_bootstrap_fails_fast_when_yahoo_is_blocked(self):
+        mod = self.load()
+        mod.probe_yahoo = lambda: False
+        mod.bootstrap = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not download"))
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = mod.main(["--data-dir", tmp, "--bootstrap"])
+        self.assertEqual(code, 70)
+        self.assertIn("not reachable", buf.getvalue())
+
+    def test_backtest_runs_on_saved_sessions_alone(self):
+        mod = self.load()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_sessions(Path(tmp) / "sessions", trading_days(12), n=30)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = mod.main(["--data-dir", tmp, "--setup-backtest"])
+            self.assertEqual(code, 0, buf.getvalue())
+            self.assertIn("SETUP BACKTEST", buf.getvalue())
+
+    def test_day_one_fhm_uses_todays_volatility(self):
+        cfg = replace(SetupConfig(), regime_long=1.1, regime_short=-0.1, enabled=("FHM",))
+        rnd = random.Random(8)
+        d = date(2026, 10, 1)
+        bars, base = {}, {}
+        for i in range(30):
+            s = f"S{i:03d}"
+            drift = 0.004 if i < 3 else 0.0
+            rows = flat_day(d, 100.0, 2_000_000 / 100.0, rnd, sigma=0.001, drift=drift)
+            bars[s] = build_day(s, rows)
+            from intelligence.setups import EMPTY_BASE
+            base[s] = replace(EMPTY_BASE, prev_close=100.0)
+        eng = SetupEngine(cfg, COST)
+        eng.step(d, bars, base, at(d, 14, 45))
+        fhm = [t for t in eng.trades if t.setup == "FHM"]
+        self.assertTrue(fhm)
+        self.assertTrue(all(t.direction == "LONG" for t in fhm))
+        self.assertIn("day-one proxy", fhm[0].facts[0])

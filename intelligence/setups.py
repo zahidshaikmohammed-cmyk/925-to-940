@@ -36,10 +36,11 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from statistics import median
 
-from .history import IST, SESSION_OPEN, Bar, Baseline, HistoryIndex
+from .history import IST, SESSION_OPEN, Bar, Baseline, HistoryIndex, to_five_minute  # noqa: F401
 
 FIVE = timedelta(minutes=5)
 ONE = timedelta(minutes=1)
+EMPTY_BASE = Baseline(days=0, prev_close=None, atr_daily=None, rvol_base=None, fh_sd=None, turnover_5m=None)
 NAMES = {"ORB": "Stocks-in-play opening range breakout",
          "FHM": "First-half-hour momentum",
          "VWT": "VWAP trend pullback"}
@@ -60,6 +61,8 @@ class SetupConfig:
     orb_stop: str = "range"                  # "range" | "atr10" (the paper's 10% of daily ATR)
     orb_atr_frac: float = 0.10
     orb_until: time = time(11, 0)
+    orb_gap_proxy: float = 1.5               # day-one mode (no volume history): |gap| >= 1.5%
+    orb_turnover_pct: float = 0.7            # ... and opening turnover in the top 30%
     # FHM
     fhm_z: float = 1.0
     fhm_top: int = 10
@@ -113,28 +116,6 @@ def build_day(symbol: str, bars: list[Bar], atr_bars: int = 14) -> DayBars:
         w = trs[-atr_bars:]
         atr.append(sum(w) / len(w))
     return DayBars(symbol, ts, o, h, l, c, v, vwap, atr)
-
-
-def to_five_minute(one_minute: list[Bar], now: datetime) -> list[Bar]:
-    """Aggregate 1-minute bars into 5-minute bars that are complete at `now`."""
-    out, cur, key = [], None, None
-    for b in one_minute:
-        t = b[0]
-        mins = (t.hour * 60 + t.minute) - (SESSION_OPEN.hour * 60 + SESSION_OPEN.minute)
-        if mins < 0:
-            continue
-        start = t.replace(second=0, microsecond=0) - timedelta(minutes=mins % 5)
-        if start + FIVE > now:
-            break
-        if start != key:
-            if cur:
-                out.append(tuple(cur))
-            key, cur = start, [start, b[1], b[2], b[3], b[4], b[5]]
-        else:
-            cur[2], cur[3], cur[4], cur[5] = max(cur[2], b[2]), min(cur[3], b[3]), b[4], cur[5] + b[5]
-    if cur:
-        out.append(tuple(cur))
-    return out
 
 
 # ------------------------------------------------------------------------- trades
@@ -216,10 +197,9 @@ class SetupEngine:
         for t in [t for t in self.trades if t.live]:
             events += self._manage(t, bars.get(t.symbol), (fine or {}).get(t.symbol), now)
         cfg = self.cfg
-        liquid = [s for s, b in bars.items()
-                  if s in base and (base[s].turnover_5m or 0) >= cfg.min_turnover_5m and b.ts]
-        ks = {s: bars[s].done(now) for s in liquid}
-        live = [s for s in liquid if ks[s] > 0]
+        base = {s: base.get(s) or EMPTY_BASE for s in bars}
+        ks = {s: b.done(now) for s, b in bars.items() if b.ts}
+        live = [s for s, k in ks.items() if k > 0 and self._turnover(bars[s], base[s], k) >= cfg.min_turnover_5m]
         if not live:
             return events
         above = sum(1 for s in live if bars[s].c[ks[s] - 1] > bars[s].vwap[ks[s] - 1]) / len(live)
@@ -236,6 +216,13 @@ class SetupEngine:
         return events
 
     # ---------------------------------------------------------------- arming
+    @staticmethod
+    def _turnover(b: DayBars, bl: Baseline, k: int) -> float:
+        """Median rupee turnover per 5-min bar: from history, else today's bars so far."""
+        if bl.turnover_5m:
+            return bl.turnover_5m
+        return median(b.c[i] * b.v[i] for i in range(k))
+
     def _cost_r(self, trigger: float, stop: float) -> float:
         risk = abs(trigger - stop)
         return self.cost_pct / 100 * trigger / risk if risk > 0 else float("inf")
@@ -266,23 +253,45 @@ class SetupEngine:
         return SetupEvent("ARMED", now.isoformat(), t.to_dict())
 
     def _arm_orb(self, bars, base, ks, live, now):
-        """Paper order: RVOL >= threshold, top N by RVOL, then trade the first candle's direction."""
+        """Paper order: in-play threshold, top N, then trade the first candle's direction.
+
+        In play = RVOL >= 2 (opening-bar volume vs its own 14-day median). Without volume
+        history (day-one mode) the stand-in is a gap of >= 1.5% with opening turnover in
+        the top 30% of the market, ranked by gap size."""
         cfg = self.cfg
-        rvols = []
-        for s in live:
-            b, bl = bars[s], base[s]
-            if b.ts[0].time() != SESSION_OPEN or not bl.rvol_base:
-                continue
-            rvols.append((b.v[0] / bl.rvol_base, s))
-        if rvols:
-            self.diag["orb_median_rvol"] = round(median(r for r, _ in rvols), 3)
-            self.diag["orb_stocks_measured"] = len(rvols)
-        rvols.sort(reverse=True)
-        ranked = {s: i + 1 for i, (_, s) in enumerate(rvols)}
-        in_play = [(r, s) for r, s in rvols if r >= cfg.orb_rvol]
+        opened = [s for s in live if bars[s].ts[0].time() == SESSION_OPEN]
+        measured = [s for s in opened if base[s].rvol_base]
+        proxy = len(measured) < 0.5 * max(1, len(opened))
+        self.diag["orb_mode"] = "DAY-ONE PROXY (gap + opening turnover)" if proxy else "RVOL"
+        scores = []                                   # (score, symbol, passes threshold, label)
+        if not proxy:
+            for s in measured:
+                r = bars[s].v[0] / base[s].rvol_base
+                scores.append((r, s, r >= cfg.orb_rvol, f"RVOL {r:.2f}x, needs {cfg.orb_rvol:.1f}x"))
+            if scores:
+                self.diag["orb_median_rvol"] = round(median(x[0] for x in scores), 3)
+                self.diag["orb_stocks_measured"] = len(scores)
+        else:
+            turn = sorted(bars[s].c[0] * bars[s].v[0] for s in opened)
+            for s in opened:
+                pc = base[s].prev_close
+                if not pc:
+                    continue
+                b = bars[s]
+                gap = (b.o[0] / pc - 1) * 100
+                pct = bisect.bisect_left(turn, b.c[0] * b.v[0]) / max(1, len(turn) - 1)
+                ok = abs(gap) >= cfg.orb_gap_proxy and pct >= cfg.orb_turnover_pct
+                scores.append((abs(gap), s, ok,
+                               f"gap {gap:+.2f}% (needs {cfg.orb_gap_proxy:.1f}%), opening turnover in the top "
+                               f"{(1 - pct) * 100:.0f}% (needs top {(1 - cfg.orb_turnover_pct) * 100:.0f}%)"))
+            self.diag["orb_stocks_measured"] = len(scores)
+        scores.sort(key=lambda x: (-x[0], x[1]))
+        ranked = {s: i + 1 for i, (_, s, _, _) in enumerate(scores)}
+        in_play = [x for x in scores if x[2]]
+        rank_in_play = {s: i + 1 for i, (_, s, _, _) in enumerate(in_play)}
         events = []
         until = datetime.combine(now.date(), cfg.orb_until, IST)
-        for r, s in rvols:
+        for score, s, ok, label in scores:
             b, bl = bars[s], base[s]
             rng = b.h[0] - b.l[0]
             if rng <= 0:
@@ -295,18 +304,19 @@ class SetupEngine:
             else:
                 stop = b.l[0] if d > 0 else b.h[0]
             cost_r = self._cost_r(trigger, stop)
-            top = ranked[s] <= cfg.orb_top and r >= cfg.orb_rvol
-            checks = [("RVOL", r >= cfg.orb_rvol, f"RVOL {r:.2f}x, needs {cfg.orb_rvol:.1f}x"),
-                      ("top-RVOL rank", ranked[s] <= cfg.orb_top or r < cfg.orb_rvol,
-                       f"RVOL rank #{ranked[s]}, needs top {cfg.orb_top}"),
+            top = ok and rank_in_play[s] <= cfg.orb_top
+            checks = [("in play", ok, label),
+                      ("top rank", (not ok) or top, f"#{rank_in_play.get(s, ranked[s])} in play, needs top {cfg.orb_top}"),
                       ("candle body", body >= cfg.orb_body, f"body {body:.0%} of range, needs {cfg.orb_body:.0%}"),
                       ("costs", cost_r <= cfg.max_cost_r, f"costs {cost_r:.2f}R, max {cfg.max_cost_r:.2f}R")]
             if not (top and body >= cfg.orb_body and cost_r <= cfg.max_cost_r):
-                if r >= 0.75 * cfg.orb_rvol:
+                if ranked[s] <= 3 * cfg.orb_top:
                     self._note("ORB", now, s, d, checks)
                 continue
+            why = (f"RVOL {score:.1f}x its 14-day median in the 09:15 bar" if not proxy else
+                   f"DAY-ONE PROXY (no volume history yet): {label}")
             ev = self._arm("ORB", s, d, trigger, stop, now, until,
-                           [f"RVOL {r:.1f}x its 14-day median in the 09:15 bar (#{ranked[s]} of {len(in_play)} stocks in play)",
+                           [f"{why} (#{rank_in_play[s]} of {len(in_play)} stocks in play)",
                             f"09:15 bar closed {'green' if d > 0 else 'red'}: body {body:.0%} of its range"])
             if ev:
                 events.append(ev)
@@ -318,14 +328,23 @@ class SetupEngine:
         for s in live:
             b, bl = bars[s], base[s]
             i940 = next((i for i in range(ks[s]) if b.ts[i].time() == time(9, 40)), None)
-            if i940 is None or not bl.fh_sd or not bl.prev_close:
+            if i940 is None or not bl.prev_close:
                 continue
-            rows.append((s, b.c[i940] / bl.prev_close - 1, bl.fh_sd))
+            sd, src = bl.fh_sd, "of its last 14 sessions"
+            if not sd and ks[s] > 20:
+                rets = [b.c[i] / b.c[i - 1] - 1 for i in range(1, ks[s])]
+                m = sum(rets) / len(rets)
+                sd = (sum((x - m) ** 2 for x in rets) / len(rets)) ** 0.5 * 6 ** 0.5
+                src = "of today's own half-hour volatility (day-one proxy)"
+            if not sd:
+                continue
+            rows.append((s, b.c[i940] / bl.prev_close - 1, sd, src))
         if not rows:
             return []
-        mkt = median(r for _, r, _ in rows)
+        mkt = median(r for _, r, _, _ in rows)
+        src_of = {s: src for s, _, _, src in rows}
         scored = []
-        for s, r, sd in rows:
+        for s, r, sd, _ in rows:
             z = r / sd if sd > 0 else 0.0
             d = 1 if r > 0 else -1
             b = bars[s]
@@ -347,7 +366,7 @@ class SetupEngine:
         for _, s, r, z, d, trig, stop, checks in scored:
             if all(ok for _, ok, _ in checks) and taken < cfg.fhm_top:
                 ev = self._arm("FHM", s, d, trig, stop, now, until,
-                               [f"09:15-09:45 move {r * 100:+.2f}% incl. gap = {z:+.1f} s.d. of its last 14 sessions",
+                               [f"09:15-09:45 move {r * 100:+.2f}% incl. gap = {z:+.1f} s.d. {src_of[s]}",
                                 f"market's first half-hour {mkt * 100:+.2f}% (median stock), regime {regime}"])
                 if ev:
                     events.append(ev)
@@ -641,7 +660,7 @@ def _hm(iso: str | None) -> str:
 def record_line(stats: dict, setup: str) -> str:
     s = stats.get(setup)
     if not s or not s.get("trades"):
-        return "no backtest yet (run: python 945.py --setup-backtest)"
+        return "UNPROVEN: no backtest yet (python 945.py --setup-backtest once 11+ sessions are saved)"
     return (f"{s['status']}: {s['trades']} backtest trades, {s['win_rate']:.0%} wins, "
             f"{s['avg_net_r']:+.2f}R avg after costs")
 
@@ -706,6 +725,8 @@ class LiveSetups:
             pc = getattr(s, "previous_close", None)
             if sym in self.base and pc:
                 self.base[sym] = _replace(self.base[sym], prev_close=pc)
+            elif sym not in self.base:
+                self.base[sym] = _replace(EMPTY_BASE, prev_close=pc)      # no history: day-one proxies
         self.prev_close_fixed = True
 
     def rvol_warning(self) -> str | None:

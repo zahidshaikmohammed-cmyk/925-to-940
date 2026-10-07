@@ -257,6 +257,25 @@ class FakeFeed:
         return truncate(self.payload, self.index, self.t)
 
 
+class LiveCoreTests(unittest.TestCase):
+    def test_default_feed_is_the_live_core_and_its_payload_scans(self):
+        spec = importlib.util.spec_from_file_location("psygrid_945_url", ROOT / "945.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.BASE_URL, "http://129.225.112.47:10000")
+        payload, index = session()
+        p, _ = truncate(payload, index, at(9, 40))
+        p.update({"schema_version": "4.0", "status": "OK", "universe_size": 989,
+                  "coverage": {"complete": True, "expected_stock_count": 989}})
+        raw = parse_payload(p, None)                       # Live Core serves no NIFTY file
+        events, summary = Scanner(TEST_CFG, W).step(raw, at(9, 40))
+        self.assertGreater(summary.eligible, 50)
+        self.assertEqual(summary.market_source, "UNIVERSE_MEDIAN")
+        closed = {"service": "PSYGRID", "schema_version": "4.0", "status": "CLOSED",
+                  "session": {"status": "CLOSED", "date": None}, "stocks": {}}
+        self.assertIsNone(mod.save_session(tempfile.mkdtemp(), DAY, closed, None))
+
+
 class CliTests(unittest.TestCase):
     def load(self):
         spec = importlib.util.spec_from_file_location("psygrid_945_scan_cli", ROOT / "945.py")

@@ -58,7 +58,7 @@ from intelligence.selector_scan import (Journal, ScanConfig, Scanner, informatio
                                         render_heartbeat, render_signal, render_update, replay, stats)
 from intelligence.selector_store import DecisionExists, Store
 
-BASE_URL = "http://140.245.226.102:10000"
+BASE_URL = "http://129.225.112.47:10000"           # PSYGRID Live Core (989 stocks); --base-url to change
 
 
 def now() -> datetime:
@@ -343,7 +343,10 @@ def save_session(data_dir: str, day, stocks, index) -> Path | None:
     so a later empty feed (PSYGRID clears candles after the close) cannot overwrite it."""
     import gzip
     import os
-    raw = parse_payload(stocks, index)
+    try:
+        raw = parse_payload(stocks, index)
+    except ValueError:                                     # closed feed: no candles at all
+        return None
     if raw.session_date != day or not any(len(x) for x in raw.stocks.values()):
         return None
     target = Path(data_dir) / "sessions" / f"{day.isoformat()}.json.gz"

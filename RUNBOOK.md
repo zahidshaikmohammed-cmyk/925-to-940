@@ -112,7 +112,8 @@ python 945.py --risk-rupees 1000   # also print a share quantity for Rs 1,000 ri
 python 945.py --allow-tier2        # also alert on Tier 2
 ```
 
-It waits for 09:30, then every minute (3 s after the candle closes) it fetches the whole
+It reads the PSYGRID Live Core feed (`http://129.225.112.47:10000/public/live.json`, 989 stocks;
+`--base-url` to change). It waits for 09:30, then every minute (3 s after the candle closes) it fetches the whole
 feed, rescans every stock in both directions with the 945 model, and prints one line:
 the market regime, the top three on the shortlist with how many scans in a row they have
 held, and why nothing is being signalled yet. It beeps three times and prints a full trade

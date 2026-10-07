@@ -31,6 +31,82 @@ HISTORY_FILE = "yahoo_5m.json.gz"
 Bar = tuple  # (ts: datetime, o, h, l, c, v)
 
 
+FIVE_MIN = timedelta(minutes=5)
+
+
+def to_five_minute(one_minute: list[Bar], now: datetime) -> list[Bar]:
+    """Aggregate 1-minute bars into 5-minute bars that are complete at `now`."""
+    out, cur, key = [], None, None
+    for b in one_minute:
+        t = b[0]
+        mins = (t.hour * 60 + t.minute) - (SESSION_OPEN.hour * 60 + SESSION_OPEN.minute)
+        if mins < 0:
+            continue
+        start = t.replace(second=0, microsecond=0) - timedelta(minutes=mins % 5)
+        if start + FIVE_MIN > now:
+            break
+        if start != key:
+            if cur:
+                out.append(tuple(cur))
+            key, cur = start, [start, b[1], b[2], b[3], b[4], b[5]]
+        else:
+            cur[2], cur[3], cur[4], cur[5] = max(cur[2], b[2]), min(cur[3], b[3]), b[4], cur[5] + b[5]
+    if cur:
+        out.append(tuple(cur))
+    return out
+
+
+# --------------------------------------------------------------------------- own history
+
+def sessions_history(sessions_dir: str | Path, last: int | None = None, before: date | None = None,
+                     say=None) -> dict[str, list[Bar]]:
+    """History built from the scanner's own saved PSYGRID sessions (data/sessions/*.json.gz):
+    the same feed, so volume is on exactly the same scale as live."""
+    from .selector_data import load_session_file
+    files = sorted(Path(sessions_dir).glob("*.json.gz"))
+    if before is not None:
+        files = [f for f in files if f.name[:10] < before.isoformat()]
+    if last:
+        files = files[-last:]
+    out: dict[str, list[Bar]] = {}
+    for f in files:
+        try:
+            raw = load_session_file(f)
+        except Exception as exc:
+            if say:
+                say(f"  skipped {f.name}: {exc}")
+            continue
+        end = datetime.combine(raw.session_date, SESSION_CLOSE, IST) + FIVE_MIN
+        for sym, ser in raw.stocks.items():
+            rows = [(ser.ts[i], ser.o[i], ser.h[i], ser.l[i], ser.c[i], ser.v[i]) for i in range(len(ser))
+                    if ser.ts[i].date() == raw.session_date]
+            five = to_five_minute(rows, end)
+            if five:
+                out.setdefault(sym, []).extend(five)
+    for sym in out:
+        out[sym].sort(key=lambda b: b[0])
+    return out
+
+
+def merge_history(*sources: dict[str, list[Bar]]) -> dict[str, list[Bar]]:
+    """Combine histories day by day; a later source wins for a day both have."""
+    merged: dict[str, dict] = {}
+    for src in sources:
+        for sym, bars in src.items():
+            days = merged.setdefault(sym, {})
+            for d, rows in by_day(bars).items():
+                days[d] = rows
+    return {s: [b for d in sorted(days) for b in days[d]] for s, days in merged.items() if days}
+
+
+def probe_yahoo(timeout: float = 8.0) -> bool:
+    """One quick request: is Yahoo reachable from this machine at all?"""
+    try:
+        return bool(fetch_symbol("RELIANCE", timeout=timeout, tries=1))
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- fetch
 
 def yahoo_symbol(symbol: str) -> str:

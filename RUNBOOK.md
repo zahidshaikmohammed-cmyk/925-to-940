@@ -164,14 +164,27 @@ Research" doc):
 | VWT VWAP trend pullback | 10:15-14:30: 80% of last 12 closes on one side of VWAP, beats the market, pulls back to VWAP on lighter volume (5 per bar, 20 a day) | pullback bar high/low, 2 bars | 0.5 ATR beyond VWAP | 5-min close through VWAP, or 15:15 |
 
 Every setup skips liquid-less stocks (< Rs 10 lakh per 5-min bar) and any stop so tight
-that costs exceed 0.5R. Once tonight (and automatically before 09:25 each day after):
+that costs exceed 0.5R.
+
+### History: your own feed first, Yahoo optional
+
+The scan saves every day of the PSYGRID feed to `data/sessions/`, and those saved days are
+the setups' history (same feed, so volume is on the same scale as live). With no history
+yet the scan runs in DAY-ONE MODE: ORB picks stocks in play by a gap of >= 1.5% with
+opening turnover in the top 30% (instead of RVOL), FHM sizes the first half-hour against
+today's own volatility, and liquidity uses today's turnover. Real RVOL takes over per stock
+after 5 saved sessions, the first-half-hour baseline after 10, and `--setup-backtest` works
+from 11. Every proxy-based signal says so in its WHY lines.
+
+If Yahoo Finance is reachable from your machine, this adds 60 days at once (it is skipped
+after one 8-second check when it is not; `--no-yahoo` skips even that):
 
 ```powershell
 python 945.py --bootstrap        # 60 days of 5-min candles for every symbol (Yahoo Finance, ~5-10 min)
 python 945.py --setup-backtest   # replays all three setups on that history, net of costs
 ```
 
-`--setup-backtest` prints per setup: trades, win rate, average and total R after costs,
+`--setup-backtest` (Yahoo history and/or your saved sessions) prints per setup: trades, win rate, average and total R after costs,
 profit factor and the first-half vs second-half average (does it hold up?), saves
 `data/history/setup_stats.json` and every trade to `data/history/setup_trades.csv`.
 A setup with 30+ trades that is positive in both halves is ACTIVE: its triggers beep and

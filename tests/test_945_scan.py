@@ -284,6 +284,8 @@ class CliTests(unittest.TestCase):
         return mod
 
     def run_cli(self, mod, argv):
+        if "--scan-replay" not in argv:
+            argv = [*argv, "--no-setups"]          # these tests cover the 945 score scan alone
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             code = mod.main(argv)

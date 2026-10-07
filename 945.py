@@ -57,7 +57,8 @@ from intelligence.selector_research import research_report
 from intelligence.selector_scan import (Journal, ScanConfig, Scanner, information_set, render_day,
                                         render_heartbeat, render_signal, render_update, replay, stats)
 from intelligence.selector_store import DecisionExists, Store
-from intelligence.history import HISTORY_FILE, HistoryIndex, bootstrap, last_day, load_history, nse_equity_symbols
+from intelligence.history import (HISTORY_FILE, HistoryIndex, bootstrap, last_day, load_history, merge_history,
+                                  nse_equity_symbols, probe_yahoo, sessions_history)
 from intelligence.setups import (NAMES as SETUP_NAMES, LiveSetups, SetupConfig, SetupEngine, SetupJournal,
                                  backtest as setup_backtest, load_stats, record_line, render_setup_update,
                                  render_stats, render_trigger, save_stats, setup_stats)
@@ -286,12 +287,23 @@ def universe_symbols(args) -> list[str]:
 
 
 def run_bootstrap(args) -> Path:
+    if not probe_yahoo():
+        raise RuntimeError("Yahoo Finance is not reachable from this machine. That's fine: the scan builds "
+                           "its own history from your feed (data/sessions) and runs day-one proxies until then")
     symbols = universe_symbols(args)
     print(f"Downloading 60 days of 5-minute candles for {len(symbols)} symbols from Yahoo Finance...")
     path = bootstrap(symbols, history_dir(args), say=print)
     hist = load_history(path)
     print(f"Saved {path} | {len(hist)} symbols | last session {last_day(hist)}")
     return path
+
+
+def combined_history(args, before=None, last=None) -> dict:
+    """Yahoo history (if it was ever downloaded) merged with the scanner's own saved sessions."""
+    path = history_dir(args) / HISTORY_FILE
+    yahoo = load_history(path) if path.exists() else {}
+    own = sessions_history(Path(args.data_dir) / "sessions", last=last, before=before)
+    return merge_history(yahoo, own)
 
 
 def cmd_bootstrap(args) -> int:
@@ -305,15 +317,15 @@ def cmd_bootstrap(args) -> int:
 
 
 def cmd_setup_backtest(args) -> int:
-    path = history_dir(args) / HISTORY_FILE
-    if not path.exists():
-        print("No history yet. Run: python 945.py --bootstrap")
-        return 50
     from intelligence.selector_scan import round_trip_cost_pct
     cost = round_trip_cost_pct(scan_config(args))
-    print(f"Loading {path} ...")
-    index = HistoryIndex(load_history(path))
+    print("Loading history (Yahoo download if any + your saved sessions in data/sessions) ...")
+    index = HistoryIndex(combined_history(args))
     days = index.days()
+    if len(days) < 11:
+        print(f"Only {len(days)} session(s) of history. The backtest needs 11+ (10 to build baselines, then "
+              f"days to trade). Each day the scan runs adds one; until then the setups run as UNPROVEN.")
+        return 50
     print(f"Backtesting the setups on {len(index.summaries)} symbols x {len(days)} sessions "
           f"({days[0] if days else '-'} to {days[-1] if days else '-'}), costs {cost:.3f}% per round trip...")
     trades = setup_backtest(index, setup_config(args), cost, say=print)
@@ -339,15 +351,12 @@ def cmd_audit(args) -> int:
     from intelligence.setup_audit import audit
     day = args.date or now().date().isoformat()
     session = Path(args.data_dir) / "sessions" / f"{day}.json.gz"
-    hist = history_dir(args) / HISTORY_FILE
     if not session.exists():
         print(f"No saved session for {day} ({session}). The scan saves it during the day.")
         return 40
-    if not hist.exists():
-        print("No history yet. Run: python 945.py --bootstrap")
-        return 50
     raw = load_session_file(session)
-    text = audit(raw, HistoryIndex(load_history(hist)), setup_config(args), round_trip_cost_pct(scan_config(args)),
+    hist = combined_history(args, before=raw.session_date, last=20)
+    text = audit(raw, HistoryIndex(hist), setup_config(args), round_trip_cost_pct(scan_config(args)),
                  Path(args.data_dir) / "setups" / f"{day}.jsonl")
     print(text)
     out = Path(args.data_dir) / "audit" / f"{day}.txt"
@@ -367,29 +376,30 @@ def previous_trading_day(day):
 def prepare_setups(args, today, cost_pct):
     if args.no_setups:
         return None
-    path = history_dir(args) / HISTORY_FILE
-    history = load_history(path) if path.exists() else {}
+    hist_file = history_dir(args) / HISTORY_FILE
     prev = previous_trading_day(today)
-    stale = (last_day(history) or date.min) < prev
-    if stale and now().time() < time(9, 25):
-        try:
-            run_bootstrap(args)
-            history = load_history(path)
-            stale = (last_day(history) or date.min) < prev
-        except Exception as exc:
-            print(f"History download failed ({type(exc).__name__}: {exc}).")
-    if not history:
-        print("SETUPS OFF: no price history. Run `python 945.py --bootstrap` (needs internet), then restart.")
-        return None
-    if stale:
-        print(f"Setups warning: history ends {last_day(history)}, not {prev}; baselines are older than usual.")
+    if hist_file.exists() or not args.no_yahoo:
+        yahoo_last = last_day(load_history(hist_file)) if hist_file.exists() else None
+        if (yahoo_last or date.min) < prev and now().time() < time(9, 25) and not args.no_yahoo:
+            try:
+                run_bootstrap(args)
+            except Exception as exc:
+                print(f"History download skipped: {exc}.")
+    history = combined_history(args, before=today, last=20)
     index = HistoryIndex(history)
     base = index.baselines(today)
+    with_rvol = sum(1 for b in base.values() if b.rvol_base)
     stats = load_stats(history_dir(args) / "setup_stats.json")
-    print(f"Setups      : {len(base)} stocks with history (to {last_day(history)})")
+    if not history:
+        print("Setups      : DAY-ONE MODE -- no history yet. ORB picks stocks in play by gap + opening "
+              "turnover, FHM measures against today's own volatility. Every day you run the scan is saved "
+              "and becomes history; real RVOL takes over after 5 sessions.")
+    else:
+        sessions = len(index.days())
+        print(f"Setups      : history {sessions} session(s) to {last_day(history)} | {with_rvol} stocks with "
+              f"RVOL history" + ("" if with_rvol else " (ORB uses the day-one gap proxy until 5 sessions)"))
     for k, name in SETUP_NAMES.items():
         print(f"  {k} {name:<38} {record_line(stats, k)}")
-    from intelligence.selector_scan import round_trip_cost_pct  # noqa: F401  (cost passed in)
     engine = SetupEngine(setup_config(args), cost_pct)
     return LiveSetups(engine, base, stats, SetupJournal(Path(args.data_dir) / "setups"), today, clock=lambda: now())
 
@@ -623,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", action="store_true", help="scan replay: print every scan and signal")
     p.add_argument("--no-archive", action="store_true", help="scan: do not save the session to data/sessions")
     p.add_argument("--no-setups", action="store_true", help="scan: run without the research setups")
+    p.add_argument("--no-yahoo", action="store_true", help="scan: never try to download Yahoo history")
     p.add_argument("--symbols", help="bootstrap: file with the symbols to download (one per line or JSON)")
     p.add_argument("--orb-stop", default="range", choices=("range", "atr10"),
                    help="ORB stop: other side of the 09:15 bar (default) or the paper's 10%% of daily ATR")

@@ -47,6 +47,20 @@ Target distance = `max(2×risk, 1.5×ATR)`.
 
 These are research defaults, not a profitability guarantee; backtest and paper-test before live use.
 
+### Precision gates (`run_engine.py` / `bbbbb.py`)
+
+- **Live data only:** no signal unless the feed says `status: OK` and session `LIVE` (exit code 33).
+- **Per-stock screen:** a stock is skipped if its newest candle closed more than 3 minutes ago, or if its median rupee turnover per minute over the last 30 minutes is under ₹2 lakh.
+- **Direction follows relative strength:** no tier, Tier 3 included, buys a stock that is lagging the market or shorts one that is beating it (`min_rs_market`, default 0%).
+- **VWAP stretch cap:** Tier 1 and Tier 2 reject a close more than 2.0 ATR from VWAP (`max_extension_from_vwap_atr`, `fallback_extension_atr_max`). The VWAP score peaks at 1.0 ATR and decays to 0 at the cap.
+- **Trigger entry:** enter only on a break of the last completed candle's low (SHORT) or high (LONG), placed as a stop-entry order. Cancel it after 2 candles, or if the stop trades first. The target is re-measured from the trigger so the trade stays 2R. `--risk-rupees N` prints the share quantity; `--min-turnover N` changes the ₹2 lakh/min liquidity floor (0 = off).
+- **Exit timing:** the clock comes from the stock's own pace, not a fixed 30 or 60 minutes. Pace is half the stock's fastest sustained 5–15-bar run in the trade's direction over the last 36 bars. From that pace the engine prints three times:
+  - a **checkpoint**: price must reach +0.5R within 1.5× the expected time, or exit;
+  - a **target ETA**: distance ÷ pace;
+  - a **time stop**: 2× the ETA, never after 15:15.
+  If the stock has no measurable move in the trade's direction, it prints "skip".
+- **Status:** `SIGNAL_READY` only for a Tier 1/2 setup scoring ≥ 55; a weaker one is `LOW_CONFIDENCE_WEAK`. Tier 3 scores use a looser formula and are not comparable (shown as `forced=`); Tier 3 is labelled `LOW_CONFIDENCE_FORCED`: no stock passed the pattern gates, so either skip the trade or trade minimum size.
+
 ## Run locally in PowerShell
 
 ```powershell
@@ -58,3 +72,34 @@ python main.py
 The program is a **signal engine only**; it does not place orders.
 
 NSE Indices maintains an official four-level industry classification (macro sector, sector, industry, basic industry), which is why the sector map is kept separate and should be sourced from an authoritative classification. citeturn2search1
+
+## Precision pick (`precision.py`) and outcome grading (`grade_signals.py`)
+
+A `SIGNAL_READY` trade must pass every one of these checks:
+
+1. **A Tier 1 or 2 setup** that passes all the gates above, with a setup score of at least 55.
+2. **The market on its side.** The engine counts the share of liquid stocks above VWAP: 60% or more means longs only, 40% or less means shorts only. In between, the trade needs 10 more persistence points.
+3. **Not already run.** No entry in a stock that has already moved 7% or more today in the trade's direction, counting from the previous close so gaps count too (`max_day_move_pct`).
+4. **The entry window.** No entries before 09:20 or after 14:45. Between 12:00 and 13:30 the trade needs 10 more persistence points.
+5. **Trend persistence of at least 60/100.** This measures, on the trade's side:
+   - VWAP hold: the share of the last 60 candles that closed on the trade's side of VWAP, and how few times price crossed VWAP in the last 30;
+   - 5-minute structure: higher highs and higher lows for a long, lower highs and lower lows for a short;
+   - volume agreement: how much volume is moving the trade's way versus against it;
+   - opening range: whether price has held beyond the 09:15–09:29 range;
+   - relative strength against both the market and the sector.
+
+   It is reduced for these reversal warnings:
+   - a climax candle;
+   - a rejection wick at the day's high or low;
+   - three or more failed breaks of the day's high or low;
+   - after 14:00, a stock already up (or down) more than 6% on the day.
+
+Among the trades that pass, the engine picks the highest **conviction**: 0.4 × setup score + 0.6 × persistence. If none pass, it prints `NO TRADE NOW` with only the closest candidate's name and what blocked it, and no trade plan, and the status `NO_PRECISION_SETUP` or `NO_NEW_ENTRIES`. Do not trade those.
+
+Run `python grade_signals.py` before 15:15, when Live Core clears its candles. It replays every signal you logged today exactly as it was printed:
+- fill on the trigger;
+- then stop, target, missed checkpoint or time stop;
+- whenever one candle touches both the stop and the target, the stop counts first.
+
+Results go into `graded_signals.jsonl`, your trade journal, with summaries by status, tier and conviction band. All thresholds are starting values. Judge them after 50 or more `SIGNAL_READY` trades.
+

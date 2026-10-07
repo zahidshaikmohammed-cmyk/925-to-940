@@ -118,8 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     with _Spy() as spy:
         code = run_engine.main(engine_args)            # exactly what bbbbb.py runs
     best = spy.best
-    if code != 0 or best is None:
-        return code
+    if code != 0 or best is None or run_engine.LAST_STATUS != "SIGNAL_READY":
+        return code  # no exit plan for a stock the engine says not to trade
 
     data = spy.parsed.get(best.symbol)
     candles = data.candles if data else ()

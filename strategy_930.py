@@ -201,6 +201,19 @@ def _leg(cs: list[Candle], side: int, cfg: StrategyConfig):
     )[0]
 
 
+def vwap_alignment_score(vw_dist: float, cfg: StrategyConfig) -> float:
+    """Reward being on the trade's side of VWAP, but not being stretched from it.
+
+    Rises from 0 at VWAP to 1 at ``vwap_sweet_spot_atr``, holds, then decays to 0
+    at ``max_extension_from_vwap_atr``: more distance is not more edge.
+    """
+    if vw_dist <= 0:
+        return 0.0
+    if vw_dist <= cfg.vwap_sweet_spot_atr:
+        return scale(vw_dist, 0.0, cfg.vwap_sweet_spot_atr)
+    return 1.0 - scale(vw_dist, cfg.vwap_sweet_spot_atr + 0.25, cfg.max_extension_from_vwap_atr)
+
+
 def _gap_pct(start: float, previous_close: float | None) -> float:
     if previous_close is None or previous_close <= 0:
         return 0.0
@@ -243,6 +256,8 @@ def _emergency_candidate(
     rs = side * (stock_ret - market_return)
     srs = side * (stock_ret - sector_return)
     vw_dist = side * (last - vw) / a
+    if rs < cfg.min_rs_market:
+        return None  # never force a trade against the stock's relative strength
 
     leg = _leg(cs, side, cfg)
     if leg:
@@ -395,6 +410,11 @@ def _build_candidate(
     _ = gap_z
     if impulse_pct < cfg.min_impulse_pct:
         return None
+    # Direction must agree with relative strength: no shorting a stock that is
+    # outperforming the market (CHEMPLASTS +8.8% vs market, shorted at 11:58),
+    # no buying one that is underperforming.
+    if rs < cfg.min_rs_market:
+        return None
 
     if tier == 1:
         if not cfg.min_retracement_depth <= depth <= cfg.max_retracement_depth:
@@ -408,6 +428,10 @@ def _build_candidate(
         if persistence < cfg.min_persistence:
             return None
         if cfg.require_vwap_confirmation and vw_dist <= 0:
+            return None
+        # Anti-exhaustion: a price already stretched this far from VWAP is
+        # late, and tends to snap back (the RICOAUTO short at +2.34 ATR).
+        if extension > cfg.max_extension_from_vwap_atr:
             return None
     elif tier == 2:
         if not cfg.fallback_retrace_min <= depth <= cfg.fallback_retrace_max:
@@ -432,7 +456,7 @@ def _build_candidate(
     sm = scale(rs, 0.10, 0.80)
     ssr = scale(srs, 0.05, 0.60)
     sv = scale(1.0 - vol_ratio, 0.0, 0.50)
-    sw = scale(max(vw_dist, 0.0), 0.0, 1.25)
+    sw = vwap_alignment_score(vw_dist, cfg)
     st = 0.5 * clamp(eff) + 0.5 * clamp(reclaim)
     sx = scale(impulse_atr, 0.5, 2.5)
     if has_sector:

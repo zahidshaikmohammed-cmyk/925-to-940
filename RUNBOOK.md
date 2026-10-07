@@ -102,7 +102,53 @@ engine_audit.jsonl
 
 This makes tomorrow's run reproducible and debuggable.
 
-## 945.py -- 09:45 intraday selector (model 945-V1)
+## 945.py -- continuous scan (default)
+
+Open PowerShell in the repo folder before 09:30 and run:
+
+```powershell
+python 945.py                      # Tier 1 alerts only
+python 945.py --risk-rupees 1000   # also print a share quantity for Rs 1,000 risk
+python 945.py --allow-tier2        # also alert on Tier 2
+```
+
+It waits for 09:30, then every minute (3 s after the candle closes) it fetches the whole
+feed, rescans every stock in both directions with the 945 model, and prints one line:
+the market regime, the top three on the shortlist with how many scans in a row they have
+held, and why nothing is being signalled yet. It beeps three times and prints a full trade
+plan only when ALL of these hold:
+
+1. score >= 85 (Tier 1; `--tier1` changes it, +3 between 12:00 and 13:30),
+2. the stock stayed in the top 10 for 3 scans in a row,
+3. it trades with the market (regime UP -> longs only, DOWN -> shorts only),
+4. it has not already moved 7% from the previous close in that direction,
+5. it is before 14:45,
+6. the stop sits within 3 ATR and the 2R target is still worth >= 1.5R after
+   ~0.14% round-trip costs (fees, STT, stamp, GST and slippage on a Rs 1 lakh order).
+
+The plan is a stop-entry order on the break of the last candle (cancel after 2 candles),
+a stop beyond the last 5 candles' swing, a 2R target and a 60-minute time stop (square-off
+15:15). The engine then follows the trade and beeps once on fill / expiry / target / stop /
+time stop. One trade at a time, never the same stock and direction twice a day, at most 3
+signals a day, and no more signals after 2 losing trades.
+
+Everything is written to `data/scan/YYYY-MM-DD.jsonl` (every event) and
+`data/scan/trades.csv` (one row per trade, gross and net R). Restarting the same day
+resumes from the journal and never repeats a signal. After the close it waits for 15:31
+and saves the full session to `data/sessions/` (skip with `--no-archive` or Ctrl+C).
+
+Before trusting a threshold, replay saved days through the exact same logic:
+
+```powershell
+python 945.py --scan-replay data\sessions            # totals net of costs
+python 945.py --scan-replay data\sessions --verbose  # every scan line and signal
+python 945.py --scan-replay data\sessions --tier1 80 # what a looser threshold would have done
+```
+
+Judge it on 50+ filled trades, not on one day. Changing `--tier1` after looking at the
+same days you replayed is curve fitting: pick it on older sessions, check it on newer ones.
+
+## 945.py --daemon -- 09:45 research decision (model 945-V1)
 
 `945.py` reads the existing PSYGRID public feed (`/public/live.json`, optional
 `/public/nifty.json`). It never writes to PSYGRID and opens no listening port.
@@ -116,7 +162,7 @@ Install once:
 * Linux VM next to PSYGRID: `sudo bash deploy/systemd/install.sh` (timer weekdays
   09:05 IST, reads `127.0.0.1:10000`, CPU 50% / RAM 512 MB / idle-IO caps, no port).
 
-Or simply run `python 945.py` any time on a trading day. It then runs the whole day:
+Or run `python 945.py --daemon` any time on a trading day. It then runs the whole day:
 
 | Time (IST) | Step | Stored |
 |---|---|---|

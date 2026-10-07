@@ -1,14 +1,25 @@
-"""945.py -- PSYGRID 09:45 IST intraday selector (model 945-V1).
+"""945.py -- PSYGRID 945 intraday engine (model 945-V1).
 
-Evaluates the whole PSYGRID stock universe using ONLY information available by 09:45,
-ranks every stock in both directions and publishes EXACTLY ONE stock + direction as an
-immutable, fingerprinted research decision. Reads the existing PSYGRID public endpoints
-only (no writes, no listening port); it cannot affect the live data plane.
+SCAN MODE (default -- start it in PowerShell before 09:30 and leave it running):
+    python 945.py                 rescans every stock on the feed once a minute from 09:30,
+                                  keeps a live shortlist, and BEEPS only when a Tier 1 setup
+                                  stays at the top for 3 scans in a row and passes the market,
+                                  over-extension and after-cost checks. It then prints a
+                                  stop-entry plan, tracks the fill, stop, target and time stop,
+                                  and records everything in data/scan/. One trade at a time,
+                                  at most 3 signals a day, stops after 2 losers.
+    python 945.py --allow-tier2   also alert on Tier 2 setups
+    python 945.py --risk-rupees 1000    print a share quantity for that rupee risk
+    python 945.py --scan-replay FILE... run the same scan minute by minute over saved sessions
+                                  (data/sessions/*.json.gz) and report results net of costs
 
-DAILY (automatic -- start once, e.g. by the scheduler in deploy/):
-    python 945.py                 full day: 09:45 decision -> +5/+15/+30 min outcomes ->
+09:45 RESEARCH DECISION (the original single-pick lifecycle, used by the scheduler):
+    python 945.py --daemon        full day: 09:45 decision -> +5/+15/+30 min outcomes ->
                                   daily report -> full-session archive after 15:31. Safe to
                                   restart at any time; it resumes and never duplicates.
+
+Reads the existing PSYGRID public endpoints only (no writes, no listening port); it
+cannot affect the live data plane, and it never places orders.
 TOOLS:
     python 945.py --status        today's lifecycle state (exit 2 if a step is overdue)
     python 945.py --decide-only   publish today's decision and exit
@@ -43,6 +54,8 @@ from intelligence.selector_feed import fetch_payloads, validate_feed
 from intelligence.selector_lifecycle import Clock, Lifecycle
 from intelligence.selector_outcomes import evaluate_decision
 from intelligence.selector_research import research_report
+from intelligence.selector_scan import (Journal, ScanConfig, Scanner, information_set, render_day,
+                                        render_heartbeat, render_signal, render_update, replay, stats)
 from intelligence.selector_store import DecisionExists, Store
 
 BASE_URL = "http://140.245.226.102:10000"
@@ -61,6 +74,18 @@ def beep() -> None:
     try:
         import winsound
         winsound.Beep(1200, 400)
+    except Exception:
+        pass
+
+
+def alert_beep() -> None:
+    """A new signal: three loud beeps, so it is heard from across the room."""
+    print("\a", end="", flush=True)
+    try:
+        import winsound
+        for _ in range(3):
+            winsound.Beep(1500, 350)
+            systime.sleep(0.12)
     except Exception:
         pass
 
@@ -195,11 +220,182 @@ def cmd_benchmark(args, cfg, weights) -> int:
     return 0 if ok else 1
 
 
+def scan_config(args) -> ScanConfig:
+    from dataclasses import replace
+    cfg = ScanConfig()
+    changes = {"allow_tier2": args.allow_tier2, "risk_rupees": args.risk_rupees}
+    if args.tier1 is not None:
+        changes["tier1_score"] = args.tier1
+    if args.order_value is not None:
+        changes["order_value"] = args.order_value
+    return replace(cfg, **changes)
+
+
+def _scan_banner(cfg: ScanConfig, scanner: Scanner) -> None:
+    print("=" * 72)
+    print("PSYGRID 945 -- CONTINUOUS SCAN")
+    print("=" * 72)
+    print(f"Scans every minute {cfg.start:%H:%M}-{cfg.stop_scanning:%H:%M} | new entries until {cfg.last_entry:%H:%M} | "
+          f"square-off {cfg.square_off:%H:%M}")
+    print(f"Alert       : {'Tier 1 or Tier 2' if cfg.allow_tier2 else 'Tier 1 only'} (score >= "
+          f"{cfg.tier2_score if cfg.allow_tier2 else cfg.tier1_score:.0f}, +{cfg.lunch_extra_score:.0f} at lunch), "
+          f"top {cfg.shortlist_size} for {cfg.confirm_scans} scans in a row, with the market")
+    print(f"Trade plan  : stop-entry on the candle break, {cfg.reward_r:.0f}R target, "
+          f"{cfg.max_hold_minutes} min time stop, net reward/risk >= {cfg.min_net_rr} after costs")
+    print(f"Costs       : ~{scanner.cost_pct:.3f}% per round trip (fees + taxes + slippage, "
+          f"Rs {cfg.order_value:,.0f} order)")
+    print(f"Discipline  : one trade at a time | max {cfg.max_signals_per_day} signals | "
+          f"stop after {cfg.max_losses_per_day} losses")
+    print("Signal only -- this program never places orders.")
+    print("=" * 72)
+
+
+def cmd_scan(args, weights) -> int:
+    from dataclasses import replace
+    cfg = scan_config(args)
+    sectors, _ = load_sectors(args.sector_map)
+    scanner = Scanner(cfg, weights, sectors)
+    journal = Journal(Path(args.data_dir) / "scan")
+    today = now().date()
+    if not is_trading_day(today):
+        print(f"NOT A NORMAL NSE TRADING DAY: {today}")
+        return 20
+    _scan_banner(cfg, scanner)
+    done = journal.trades(today.isoformat())
+    if done:
+        scanner.restore(today, done)
+        print(f"Resumed today's journal: {len(done)} signal(s) already recorded -- they will not repeat.")
+        if scanner.active:
+            print(f"Still tracking #{scanner.active.number} {scanner.active.symbol} {scanner.active.direction} "
+                  f"({scanner.active.state}).")
+
+    def at(t):
+        return datetime.combine(today, t, IST)
+
+    first, last = at(cfg.start), at(cfg.stop_scanning)
+    if now() < first:
+        print(f"Waiting for {cfg.start:%H:%M} IST (the first scan uses the 09:15-09:29 candles)...")
+    scanned: set = set()
+    warned = None
+    try:
+        while True:
+            t = now()
+            if t < first + timedelta(seconds=3):
+                sleep(min(30.0, (first + timedelta(seconds=3) - t).total_seconds()))
+                continue
+            cutoff = t.replace(second=0, microsecond=0)
+            if cutoff > last:
+                break
+            if cutoff in scanned:
+                sleep(max(0.5, (cutoff + timedelta(minutes=1, seconds=3) - t).total_seconds()))
+                continue
+            try:
+                stocks, index = fetch(args.base_url)
+                raw = parse_payload(stocks, index, source=f"{args.base_url}/public/live.json")
+                health = validate_feed(raw, information_set(raw, cutoff), t, scanner.sel, is_trading_day)
+                problem = None if health.ok else "; ".join(health.failures())
+            except Exception as exc:
+                problem = f"feed error: {type(exc).__name__}: {exc}"
+            if problem:
+                if t.second < 45:                       # the feed may publish the candle late
+                    sleep(5)
+                    continue
+                if warned != problem:
+                    print(f"[{cutoff:%H:%M}] FEED NOT READY -- scan skipped: {problem}")
+                    warned = problem
+                scanned.add(cutoff)
+                continue
+            warned = None
+            events, summary = scanner.step(raw, cutoff)
+            scanned.add(cutoff)
+            for ev in events:                          # trade updates first, then the scan line
+                journal.write(ev)
+                if ev.kind != "SIGNAL":
+                    beep()
+                    print(render_update(ev), flush=True)
+            print(render_heartbeat(summary, cfg), flush=True)
+            for ev in events:
+                if ev.kind == "SIGNAL":
+                    alert_beep()
+                    print(render_signal(ev.trade), flush=True)
+    except KeyboardInterrupt:
+        print("\nStopped by you (Ctrl+C). Everything so far is saved in the journal.")
+        print(render_day(scanner.trades))
+        return 0
+    print(render_day(scanner.trades))
+    print(f"Journal: {journal.path(today.isoformat())} | all trades: {journal.root / 'trades.csv'}")
+    # Save the full session so it can be replayed with --scan-replay.
+    sel = replace(SelectorConfig(), sessions_dir=str(Path(args.data_dir) / "sessions"))
+    target = Path(sel.sessions_dir) / f"{today.isoformat()}.json.gz"
+    if target.exists() or args.no_archive:
+        return 0
+    print("Saving today's full session for replay after 15:31 (Ctrl+C to skip)...")
+    try:
+        while now() < at(sel.archive_after):
+            sleep(min(30.0, (at(sel.archive_after) - now()).total_seconds() + 0.5))
+        for _ in range(5):
+            try:
+                print(f"ARCHIVED {lifecycle_for_archive(args, sel, weights).archive_session()}")
+                break
+            except Exception as exc:
+                print(f"archive failed ({exc}); retrying in 60 s")
+                sleep(60)
+    except KeyboardInterrupt:
+        print("Archive skipped.")
+    return 0
+
+
+def lifecycle_for_archive(args, sel, weights) -> Lifecycle:
+    return Lifecycle(sel, weights, str(Path(args.data_dir) / "psygrid_945.sqlite"), args.base_url, {}, "none",
+                     is_trading_day, Clock(lambda: now(), lambda s: sleep(s)), fetch=lambda b: fetch(b),
+                     out=print)
+
+
+def cmd_scan_replay(args, weights) -> int:
+    cfg = scan_config(args)
+    sectors, _ = load_sectors(args.sector_map)
+    files: list[Path] = []
+    for item in args.scan_replay:
+        p = Path(item)
+        files += sorted(p.glob("*.json*")) if p.is_dir() else ([p] if p.is_file() else [])
+    if not files:
+        print("No session files found. The scanner and `--daemon` save one per day in data/sessions/.")
+        return 50
+    scanner = Scanner(cfg, weights, sectors)
+    _scan_banner(cfg, scanner)
+    everything = []
+    for f in files:
+        try:
+            raw = load_session_file(f)
+        except Exception as exc:
+            print(f"{f}: unreadable ({exc}) -- skipped")
+            continue
+        print(f"\nREPLAY {raw.session_date} ({f.name})")
+        show = (lambda ev: print(render_signal(ev.trade) if ev.kind == "SIGNAL" else render_update(ev))) \
+            if args.verbose else None
+        trades = replay(raw, scanner, on_event=show,
+                        on_scan=(lambda s: print(render_heartbeat(s, cfg))) if args.verbose else None)
+        print(render_day(trades, f"{raw.session_date} SUMMARY"))
+        everything += trades
+    st = stats(everything)
+    wr = "n/a" if st["win_rate"] is None else f"{st['win_rate']:.0%}"
+    print("\n" + "=" * 72)
+    print(f"REPLAY TOTAL over {len(files)} session(s)")
+    print(f"Signals {st['signals']} | filled {st['filled']} | expired {st['expired']} | win rate {wr}")
+    print(f"Net {st['net_r']:+.2f}R after costs (gross {st['gross_r']:+.2f}R) | avg {st['avg_net_r'] if st['avg_net_r'] is not None else 'n/a'}R per trade "
+          f"| exits {st['by_exit']}")
+    if st["filled"] < 50:
+        print(f"Only {st['filled']} filled trades: too few to judge. Keep archiving sessions and replay again at 50+.")
+    print("=" * 72)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="945.py", description="PSYGRID 09:45 intraday selector (945-V1)",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     g = p.add_mutually_exclusive_group()
-    for flag, hlp in (("--daemon", "run the full automatic day (same as no flag)"),
+    for flag, hlp in (("--daemon", "run the 09:45 research-decision day (the scheduler uses this)"),
+                      ("--scan", "continuous scan from 09:30 with beep alerts (same as no flag)"),
                       ("--decide-only", "publish today's decision and exit"),
                       ("--status", "today's lifecycle state"), ("--evaluate", "record outcomes that are due now"),
                       ("--verify", "reproduce a stored decision from its frozen input"),
@@ -208,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
                       ("--benchmark", "989-stock benchmark"), ("--self-test", "run the 945 test suite")):
         g.add_argument(flag, action="store_true", help=hlp)
     g.add_argument("--replay", metavar="FILE", help="decide from a saved session file")
+    g.add_argument("--scan-replay", nargs="+", metavar="PATH", help="run the scan over saved session files/dirs")
     g.add_argument("--backtest", nargs="+", metavar="PATH", help="session files/dirs for walk-forward replay")
     p.add_argument("--date", help="YYYY-MM-DD for --show / --verify (default today)")
     p.add_argument("--mode", default="live", choices=("live", "replay", "backtest"), help="decision mode for --show")
@@ -219,6 +416,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-store", action="store_true", help="with --replay: do not persist")
     p.add_argument("--stocks", type=int, default=989, help="with --benchmark: universe size")
     p.add_argument("--base-url", default=BASE_URL)
+    p.add_argument("--allow-tier2", action="store_true", help="scan: also alert on Tier 2 setups")
+    p.add_argument("--tier1", type=float, help="scan: Tier 1 score threshold (default 85)")
+    p.add_argument("--risk-rupees", type=float, help="scan: print a share quantity for this rupee risk")
+    p.add_argument("--order-value", type=float, help="scan: typical order value in rupees for the cost model (default 100000)")
+    p.add_argument("--verbose", action="store_true", help="scan replay: print every scan and signal")
+    p.add_argument("--no-archive", action="store_true", help="scan: do not wait to save the session after the close")
     args = p.parse_args(argv)
 
     from dataclasses import replace
@@ -229,9 +432,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.db is None:
         args.db = str(d / "backtest_945.sqlite") if (args.backtest or args.report) else cfg.db_path
 
+    if args.scan_replay:
+        return cmd_scan_replay(args, weights)
+    if not any((args.daemon, args.decide_only, args.status, args.evaluate, args.verify, args.show, args.research,
+                args.archive, args.report, args.benchmark, args.self_test, args.replay, args.backtest)):
+        return cmd_scan(args, weights)
     if args.self_test:
         import unittest
-        suite = unittest.defaultTestLoader.loadTestsFromNames(["tests.test_945", "tests.test_945_production"])
+        suite = unittest.defaultTestLoader.loadTestsFromNames(["tests.test_945", "tests.test_945_production",
+                                                               "tests.test_945_scan"])
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 10
     if args.benchmark:
         return cmd_benchmark(args, cfg, weights)

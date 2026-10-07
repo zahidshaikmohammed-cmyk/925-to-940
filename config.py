@@ -41,6 +41,8 @@ class StrategyConfig:
     exhaustion_reclaim_distance_atr: float = 0.35
 
     # Strict confirmation filters
+    # Minimum relative strength vs the market in the trade's direction (%), all tiers.
+    min_rs_market: float = 0.0
     min_directional_efficiency: float = 0.45
     max_retracement_volume_ratio: float = 0.80
     min_persistence: float = 0.60

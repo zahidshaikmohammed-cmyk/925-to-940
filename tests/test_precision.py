@@ -56,6 +56,18 @@ class VwapStretchTests(unittest.TestCase):
         self.assertFalse(any(c.tier in (1, 2) for c in evaluate_tiers("X", cs, cs[-1].close, None, 0, 0, [], capped)))
 
 
+class RelativeStrengthDirectionTests(unittest.TestCase):
+    def test_no_tier_trades_against_relative_strength(self):
+        from tests.test_strategy_930 import valid_long_fixture
+        cs = valid_long_fixture()  # a clean Tier 1 LONG when the market is flat
+        cfg = StrategyConfig()
+        self.assertTrue(any(c.side == "LONG" and c.tier == 1 for c in evaluate_tiers("X", cs, cs[-1].close, None, 0.0, 0.0, [], cfg)))
+        # Same chart while the market rallied 10%: the stock is a laggard, so no LONG at any tier.
+        lagging = evaluate_tiers("X", cs, cs[-1].close, None, 10.0, 10.0, [], cfg)
+        self.assertFalse(any(c.side == "LONG" for c in lagging), [(c.side, c.tier) for c in lagging])
+        self.assertTrue(all(c.rs_market >= cfg.min_rs_market for c in lagging))
+
+
 class PrecisionScreenTests(unittest.TestCase):
     def setUp(self):
         self.cfg = StrategyConfig()

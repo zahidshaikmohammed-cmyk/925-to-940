@@ -51,6 +51,7 @@ These are research defaults, not a profitability guarantee; backtest and paper-t
 
 - **Live data only:** no signal unless the feed says `status: OK` and session `LIVE` (exit code 33).
 - **Per-stock screen:** a stock is skipped if its newest candle closed more than 3 minutes ago, or if its median rupee turnover per minute over the last 10 minutes is under ₹5 lakh.
+- **Direction follows relative strength:** no tier, Tier 3 included, buys a stock that is lagging the market or shorts one that is beating it (`min_rs_market`, default 0%).
 - **VWAP stretch cap:** Tier 1 and Tier 2 reject a close more than 2.0 ATR from VWAP (`max_extension_from_vwap_atr`, `fallback_extension_atr_max`). The VWAP score peaks at 1.0 ATR and decays to 0 at the cap.
 - **Trigger entry:** enter only on a break of the last completed candle's low (SHORT) or high (LONG), placed as a stop-entry order. Cancel it after 2 candles, or if the stop trades first. The target is re-measured from the trigger so the trade stays 2R. `--risk-rupees N` prints the share quantity; `--min-turnover N` changes the ₹5 lakh/min liquidity floor (0 = off).
 - **Exit timing:** the clock comes from the stock's own pace, not a fixed 30 or 60 minutes. Pace is half the stock's fastest sustained 5–15-bar run in the trade's direction over the last 36 bars. From that pace the engine prints three times:

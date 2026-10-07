@@ -256,6 +256,8 @@ def _emergency_candidate(
     rs = side * (stock_ret - market_return)
     srs = side * (stock_ret - sector_return)
     vw_dist = side * (last - vw) / a
+    if rs < cfg.min_rs_market:
+        return None  # never force a trade against the stock's relative strength
 
     leg = _leg(cs, side, cfg)
     if leg:
@@ -407,6 +409,11 @@ def _build_candidate(
     _ = gap
     _ = gap_z
     if impulse_pct < cfg.min_impulse_pct:
+        return None
+    # Direction must agree with relative strength: no shorting a stock that is
+    # outperforming the market (CHEMPLASTS +8.8% vs market, shorted at 11:58),
+    # no buying one that is underperforming.
+    if rs < cfg.min_rs_market:
         return None
 
     if tier == 1:

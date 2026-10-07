@@ -132,7 +132,7 @@ def print_candidate(title: str, c: Candidate | None) -> None:
     print(f"IMPULSE      : {c.impulse_pct:+.3f}% / {c.impulse_atr:.2f} ATR")
     print(f"RETRACEMENT  : {c.retracement_depth * 100:.1f}%")
     print(f"RETRACE VOL  : {c.retracement_volume_ratio:.2f}x")
-    print(f"RS MARKET    : {c.rs_market:+.3f}%")
+    print(f"RS MARKET    : {c.rs_market:+.3f}% (in the trade's direction; + = trading with relative strength)")
     print(f"RS SECTOR    : {c.rs_sector:+.3f}%")
     print(f"VWAP DIST    : {c.vwap_distance_atr:+.3f} ATR")
     print(f"ATR          : {c.atr_value:.4f}")

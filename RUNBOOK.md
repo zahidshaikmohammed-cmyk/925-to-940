@@ -151,6 +151,38 @@ python 945.py --scan-replay data\sessions --tier1 80 # what a looser threshold w
 Judge it on 50+ filled trades, not on one day. Changing `--tier1` after looking at the
 same days you replayed is curve fitting: pick it on older sessions, check it on newer ones.
 
+## 945.py research setups (runs inside the scan)
+
+Three setups with published evidence run on every stock alongside the 945 score
+(full research, formulas and sources: the "High-Probability Intraday Setups: NSE
+Research" doc):
+
+| Setup | Armed | Trigger | Stop | Exit |
+|---|---|---|---|---|
+| ORB stocks-in-play opening range breakout | 09:20: top 20 by RVOL (>= 2x the 14-day median 09:15-bar volume), clear first candle | 09:15 bar high (green) / low (red), until 11:00 | other side of that bar (`--orb-stop atr10` = 10% of daily ATR) | 15:15 |
+| FHM first-half-hour momentum | 14:45: top 10 by 09:15-09:45 move vs its own normal size (>= 1 s.d.), with the market | 14:30-14:45 range high/low, until 15:05 | other side of the range | 15:15 |
+| VWT VWAP trend pullback | 10:15-14:30: 80% of last 12 closes on one side of VWAP, beats the market, pulls back to VWAP on lighter volume (5 per bar, 20 a day) | pullback bar high/low, 2 bars | 0.5 ATR beyond VWAP | 5-min close through VWAP, or 15:15 |
+
+Every setup skips liquid-less stocks (< Rs 10 lakh per 5-min bar) and any stop so tight
+that costs exceed 0.5R. Once tonight (and automatically before 09:25 each day after):
+
+```powershell
+python 945.py --bootstrap        # 60 days of 5-min candles for every symbol (Yahoo Finance, ~5-10 min)
+python 945.py --setup-backtest   # replays all three setups on that history, net of costs
+```
+
+`--setup-backtest` prints per setup: trades, win rate, average and total R after costs,
+profit factor and the first-half vs second-half average (does it hold up?), saves
+`data/history/setup_stats.json` and every trade to `data/history/setup_trades.csv`.
+A setup with 30+ trades that is positive in both halves is ACTIVE: its triggers beep and
+print the full plan with its track record. A losing setup is MUTED: still detected and
+logged, never beeps. Live, every ARMED level is printed as it is set, so you can see what
+the engine is waiting for. Journal: `data/setups/YYYY-MM-DD.jsonl` and `data/setups/trades.csv`.
+`--no-setups` runs the scan without them.
+
+Caveats: Yahoo's 5-minute volume and PSYGRID's 1-minute volume can differ slightly, which
+shifts RVOL; 60 days is one market regime, so re-run `--setup-backtest` weekly.
+
 ## 945.py --daemon -- 09:45 research decision (model 945-V1)
 
 `945.py` reads the existing PSYGRID public feed (`/public/live.json`, optional

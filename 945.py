@@ -43,7 +43,7 @@ import sys
 import tempfile
 import time as systime
 import tracemalloc
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from intelligence.selector_945 import decide, render
@@ -57,6 +57,10 @@ from intelligence.selector_research import research_report
 from intelligence.selector_scan import (Journal, ScanConfig, Scanner, information_set, render_day,
                                         render_heartbeat, render_signal, render_update, replay, stats)
 from intelligence.selector_store import DecisionExists, Store
+from intelligence.history import HISTORY_FILE, HistoryIndex, bootstrap, last_day, load_history, nse_equity_symbols
+from intelligence.setups import (NAMES as SETUP_NAMES, LiveSetups, SetupConfig, SetupEngine, SetupJournal,
+                                 backtest as setup_backtest, load_stats, record_line, render_setup_update,
+                                 render_stats, render_trigger, save_stats, setup_stats)
 
 BASE_URL = "http://129.225.112.47:10000"           # PSYGRID Live Core (989 stocks); --base-url to change
 
@@ -250,6 +254,134 @@ def _scan_banner(cfg: ScanConfig, scanner: Scanner) -> None:
     print("=" * 72)
 
 
+def setup_config(args) -> SetupConfig:
+    from dataclasses import replace
+    return replace(SetupConfig(), orb_stop=args.orb_stop)
+
+
+def history_dir(args) -> Path:
+    return Path(args.data_dir) / "history"
+
+
+def universe_symbols(args) -> list[str]:
+    """Symbols to download: --symbols file > live feed > data/universe.json > NSE equity list."""
+    if args.symbols:
+        text = Path(args.symbols).read_text(encoding="utf-8")
+        try:
+            data = json.loads(text)
+            return sorted(data if isinstance(data, list) else data.keys())
+        except ValueError:
+            return sorted({x.strip() for x in text.replace(",", "\n").splitlines() if x.strip()})
+    try:
+        stocks, _ = fetch(args.base_url)
+        if isinstance(stocks, dict) and stocks.get("stocks"):
+            return sorted(stocks["stocks"])
+    except Exception:
+        pass
+    saved = Path(args.data_dir) / "universe.json"
+    if saved.exists():
+        return sorted(json.loads(saved.read_text()))
+    print("Feed is closed and no saved universe yet: using NSE's full equity list (EQ series).")
+    return nse_equity_symbols()
+
+
+def run_bootstrap(args) -> Path:
+    symbols = universe_symbols(args)
+    print(f"Downloading 60 days of 5-minute candles for {len(symbols)} symbols from Yahoo Finance...")
+    path = bootstrap(symbols, history_dir(args), say=print)
+    hist = load_history(path)
+    print(f"Saved {path} | {len(hist)} symbols | last session {last_day(hist)}")
+    return path
+
+
+def cmd_bootstrap(args) -> int:
+    try:
+        run_bootstrap(args)
+    except Exception as exc:
+        print(f"History download failed: {type(exc).__name__}: {exc}")
+        return 70
+    print("Next: python 945.py --setup-backtest")
+    return 0
+
+
+def cmd_setup_backtest(args) -> int:
+    path = history_dir(args) / HISTORY_FILE
+    if not path.exists():
+        print("No history yet. Run: python 945.py --bootstrap")
+        return 50
+    from intelligence.selector_scan import round_trip_cost_pct
+    cost = round_trip_cost_pct(scan_config(args))
+    print(f"Loading {path} ...")
+    index = HistoryIndex(load_history(path))
+    days = index.days()
+    print(f"Backtesting the setups on {len(index.summaries)} symbols x {len(days)} sessions "
+          f"({days[0] if days else '-'} to {days[-1] if days else '-'}), costs {cost:.3f}% per round trip...")
+    trades = setup_backtest(index, setup_config(args), cost, say=print)
+    stats = setup_stats(trades)
+    print(render_stats(stats, f"SETUP BACKTEST {days[10] if len(days) > 10 else '-'} to {days[-1] if days else '-'}"))
+    save_stats(history_dir(args) / "setup_stats.json", stats, days)
+    import csv
+    out = history_dir(args) / "setup_trades.csv"
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(SetupJournal.FIELDS) + ["facts"], extrasaction="ignore")
+        w.writeheader()
+        for t in trades:
+            row = t.to_dict()
+            row["facts"] = " | ".join(row["facts"])
+            w.writerow(row)
+    print(f"Every backtest trade: {out}")
+    print("Live alerts use these results: ACTIVE setups beep, MUTED setups are only logged.")
+    return 0
+
+
+def previous_trading_day(day):
+    d = day - timedelta(days=1)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def prepare_setups(args, today, cost_pct):
+    if args.no_setups:
+        return None
+    path = history_dir(args) / HISTORY_FILE
+    history = load_history(path) if path.exists() else {}
+    prev = previous_trading_day(today)
+    stale = (last_day(history) or date.min) < prev
+    if stale and now().time() < time(9, 25):
+        try:
+            run_bootstrap(args)
+            history = load_history(path)
+            stale = (last_day(history) or date.min) < prev
+        except Exception as exc:
+            print(f"History download failed ({type(exc).__name__}: {exc}).")
+    if not history:
+        print("SETUPS OFF: no price history. Run `python 945.py --bootstrap` (needs internet), then restart.")
+        return None
+    if stale:
+        print(f"Setups warning: history ends {last_day(history)}, not {prev}; baselines are older than usual.")
+    index = HistoryIndex(history)
+    base = index.baselines(today)
+    stats = load_stats(history_dir(args) / "setup_stats.json")
+    print(f"Setups      : {len(base)} stocks with history (to {last_day(history)})")
+    for k, name in SETUP_NAMES.items():
+        print(f"  {k} {name:<38} {record_line(stats, k)}")
+    from intelligence.selector_scan import round_trip_cost_pct  # noqa: F401  (cost passed in)
+    engine = SetupEngine(setup_config(args), cost_pct)
+    return LiveSetups(engine, base, stats, SetupJournal(Path(args.data_dir) / "setups"), today)
+
+
+def save_universe(args, stocks) -> None:
+    p = Path(args.data_dir) / "universe.json"
+    try:
+        syms = sorted(stocks["stocks"])
+        if syms and (not p.exists() or sorted(json.loads(p.read_text())) != syms):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(syms))
+    except Exception:
+        pass
+
+
 def cmd_scan(args, weights) -> int:
     cfg = scan_config(args)
     sectors, _ = load_sectors(args.sector_map)
@@ -260,6 +392,7 @@ def cmd_scan(args, weights) -> int:
         print(f"NOT A NORMAL NSE TRADING DAY: {today}")
         return 20
     _scan_banner(cfg, scanner)
+    setups = prepare_setups(args, today, scanner.cost_pct)
     done = journal.trades(today.isoformat())
     if done:
         scanner.restore(today, done)
@@ -271,9 +404,10 @@ def cmd_scan(args, weights) -> int:
     def at(t):
         return datetime.combine(today, t, IST)
 
-    first, last = at(cfg.start), at(cfg.stop_scanning)
+    first, last = at(time(9, 20) if setups else cfg.start), at(cfg.stop_scanning)
+    score_from = at(cfg.start)
     if now() < first:
-        print(f"Waiting for {cfg.start:%H:%M} IST (the first scan uses the 09:15-09:29 candles)...")
+        print(f"Waiting for {first:%H:%M} IST (setups arm from 09:20; the 945 score scan starts at {cfg.start:%H:%M})...")
     scanned: set = set()
     warned = None
     latest = None
@@ -293,7 +427,10 @@ def cmd_scan(args, weights) -> int:
             try:
                 stocks, index = fetch(args.base_url)
                 raw = parse_payload(stocks, index, source=f"{args.base_url}/public/live.json")
-                health = validate_feed(raw, information_set(raw, cutoff), t, scanner.sel, is_trading_day)
+                from dataclasses import replace as _replace
+                elapsed = int((cutoff - at(time(9, 15))).total_seconds() // 60)
+                sel = _replace(scanner.sel, min_bars=max(1, min(scanner.sel.min_bars, elapsed)))
+                health = validate_feed(raw, information_set(raw, cutoff), t, sel, is_trading_day)
                 problem = None if health.ok else "; ".join(health.failures())
             except Exception as exc:
                 problem = f"feed error: {type(exc).__name__}: {exc}"
@@ -307,9 +444,14 @@ def cmd_scan(args, weights) -> int:
                 scanned.add(cutoff)
                 continue
             warned = None
-            events, summary = scanner.step(raw, cutoff)
+            if cutoff >= score_from:
+                events, summary = scanner.step(raw, cutoff)
+            else:
+                events, summary = [], None
             scanned.add(cutoff)
             latest = (stocks, index)
+            if not scanned - {cutoff}:
+                save_universe(args, stocks)
             if not args.no_archive and (cutoff.minute % 15 == 0 or cutoff == last):
                 saved = save_session(args.data_dir, today, stocks, index) or saved
             for ev in events:                          # trade updates first, then the scan line
@@ -317,11 +459,27 @@ def cmd_scan(args, weights) -> int:
                 if ev.kind != "SIGNAL":
                     beep()
                     print(render_update(ev), flush=True)
-            print(render_heartbeat(summary, cfg), flush=True)
+            if summary is not None:
+                print(render_heartbeat(summary, cfg), flush=True)
+            else:
+                print(f"[{cutoff:%H:%M}] setups watching the open (945 score scan starts {cfg.start:%H:%M})", flush=True)
             for ev in events:
                 if ev.kind == "SIGNAL":
                     alert_beep()
                     print(render_signal(ev.trade), flush=True)
+            if setups:
+                try:
+                    for ev in setups.on_scan(raw.stocks, cutoff):
+                        muted = setups.muted(ev.trade["setup"])
+                        if ev.kind == "TRIGGERED" and not muted:
+                            alert_beep()
+                            print(render_trigger(ev.trade, setups.stats, cfg.risk_rupees), flush=True)
+                            continue
+                        if ev.kind in ("STOP", "EXIT_VWAP", "SQUARE_OFF") and not muted:
+                            beep()
+                        print(render_setup_update(ev, setups.stats), flush=True)
+                except Exception as exc:                # a setup bug never stops the scanner
+                    print(f"[{cutoff:%H:%M}] setup engine error: {type(exc).__name__}: {exc}")
     except KeyboardInterrupt:
         print("\nStopped by you (Ctrl+C). Everything so far is saved in the journal.")
         if latest and not args.no_archive:
@@ -329,8 +487,12 @@ def cmd_scan(args, weights) -> int:
         if saved:
             print(f"Session saved for replay: {saved}")
         print(render_day(scanner.trades))
+        if setups:
+            print(setups.summary())
         return 0
     print(render_day(scanner.trades))
+    if setups:
+        print(setups.summary())
     print(f"Journal: {journal.path(today.isoformat())} | all trades: {journal.root / 'trades.csv'}")
     if saved:
         print(f"Session saved for replay: {saved}")
@@ -413,6 +575,8 @@ def main(argv: list[str] | None = None) -> int:
         g.add_argument(flag, action="store_true", help=hlp)
     g.add_argument("--replay", metavar="FILE", help="decide from a saved session file")
     g.add_argument("--scan-replay", nargs="+", metavar="PATH", help="run the scan over saved session files/dirs")
+    g.add_argument("--bootstrap", action="store_true", help="download 60 days of 5-min history (Yahoo) for the setups")
+    g.add_argument("--setup-backtest", action="store_true", help="backtest the research setups on the downloaded history")
     g.add_argument("--backtest", nargs="+", metavar="PATH", help="session files/dirs for walk-forward replay")
     p.add_argument("--date", help="YYYY-MM-DD for --show / --verify (default today)")
     p.add_argument("--mode", default="live", choices=("live", "replay", "backtest"), help="decision mode for --show")
@@ -430,6 +594,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--order-value", type=float, help="scan: typical order value in rupees for the cost model (default 100000)")
     p.add_argument("--verbose", action="store_true", help="scan replay: print every scan and signal")
     p.add_argument("--no-archive", action="store_true", help="scan: do not save the session to data/sessions")
+    p.add_argument("--no-setups", action="store_true", help="scan: run without the research setups")
+    p.add_argument("--symbols", help="bootstrap: file with the symbols to download (one per line or JSON)")
+    p.add_argument("--orb-stop", default="range", choices=("range", "atr10"),
+                   help="ORB stop: other side of the 09:15 bar (default) or the paper's 10%% of daily ATR")
     args = p.parse_args(argv)
 
     from dataclasses import replace
@@ -442,13 +610,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.scan_replay:
         return cmd_scan_replay(args, weights)
+    if args.bootstrap:
+        return cmd_bootstrap(args)
+    if args.setup_backtest:
+        return cmd_setup_backtest(args)
     if not any((args.daemon, args.decide_only, args.status, args.evaluate, args.verify, args.show, args.research,
                 args.archive, args.report, args.benchmark, args.self_test, args.replay, args.backtest)):
         return cmd_scan(args, weights)
     if args.self_test:
         import unittest
         suite = unittest.defaultTestLoader.loadTestsFromNames(["tests.test_945", "tests.test_945_production",
-                                                               "tests.test_945_scan"])
+                                                               "tests.test_945_scan", "tests.test_setups"])
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 10
     if args.benchmark:
         return cmd_benchmark(args, cfg, weights)

@@ -257,6 +257,25 @@ class FakeFeed:
         return truncate(self.payload, self.index, self.t)
 
 
+class LiveCoreTests(unittest.TestCase):
+    def test_default_feed_is_the_live_core_and_its_payload_scans(self):
+        spec = importlib.util.spec_from_file_location("psygrid_945_url", ROOT / "945.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.BASE_URL, "http://129.225.112.47:10000")
+        payload, index = session()
+        p, _ = truncate(payload, index, at(9, 40))
+        p.update({"schema_version": "4.0", "status": "OK", "universe_size": 989,
+                  "coverage": {"complete": True, "expected_stock_count": 989}})
+        raw = parse_payload(p, None)                       # Live Core serves no NIFTY file
+        events, summary = Scanner(TEST_CFG, W).step(raw, at(9, 40))
+        self.assertGreater(summary.eligible, 50)
+        self.assertEqual(summary.market_source, "UNIVERSE_MEDIAN")
+        closed = {"service": "PSYGRID", "schema_version": "4.0", "status": "CLOSED",
+                  "session": {"status": "CLOSED", "date": None}, "stocks": {}}
+        self.assertIsNone(mod.save_session(tempfile.mkdtemp(), DAY, closed, None))
+
+
 class CliTests(unittest.TestCase):
     def load(self):
         spec = importlib.util.spec_from_file_location("psygrid_945_scan_cli", ROOT / "945.py")
@@ -305,6 +324,30 @@ class CliTests(unittest.TestCase):
             sigs = [json.loads(x)["trade"]["symbol"] for x in day_file.read_text().splitlines()
                     if json.loads(x)["kind"] == "SIGNAL"]
             self.assertEqual(len(sigs), len(set(sigs)))
+
+    def test_live_scan_saves_the_session_and_an_empty_feed_cannot_overwrite_it(self):
+        mod = self.load()
+        feed = FakeFeed(*session())
+        mod.now, mod.sleep, mod.fetch = feed.now, feed.sleep, feed.fetch
+        mod.is_trading_day = lambda d: True
+        mod.beep = mod.alert_beep = lambda: None
+        mod.scan_config = lambda args: replace(TEST_CFG, stop_scanning=time(9, 50))
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self.run_cli(mod, ["--data-dir", tmp])
+            self.assertEqual(code, 0, out)
+            saved = Path(tmp) / "sessions" / f"{DAY.isoformat()}.json.gz"
+            self.assertTrue(saved.exists(), out)
+            self.assertIn("Session saved for replay", out)
+            before = saved.read_bytes()
+            from intelligence.selector_data import load_session_file
+            raw = load_session_file(saved)
+            self.assertEqual(max(s.ts[-1] for s in raw.stocks.values() if len(s)), at(9, 49))
+            # after the close the feed is empty: nothing is overwritten
+            empty = {"stocks": {}, "session": {"date": DAY.isoformat()}}
+            self.assertIsNone(mod.save_session(tmp, DAY, empty, None))
+            self.assertEqual(saved.read_bytes(), before)
+            code, out = self.run_cli(mod, ["--scan-replay", str(saved)])
+            self.assertEqual(code, 0, out)
 
     def test_stale_feed_is_never_scanned(self):
         mod = self.load()

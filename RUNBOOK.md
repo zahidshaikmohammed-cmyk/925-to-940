@@ -151,7 +151,12 @@ python 945.py --scan-replay data\sessions --tier1 80 # what a looser threshold w
 Judge it on 50+ filled trades, not on one day. Changing `--tier1` after looking at the
 same days you replayed is curve fitting: pick it on older sessions, check it on newer ones.
 
-## 945.py research setups (runs inside the scan)
+## 945.py research setups (the default)
+
+`python 945.py` runs the three research setups below. The 945 score signals
+(continuous scan section above) are off by default because their weights are untested
+priors; `--score` turns them back on alongside the setups, `--no-setups` runs them alone.
+
 
 Three setups with published evidence run on every stock alongside the 945 score
 (full research, formulas and sources: the "High-Probability Intraday Setups: NSE

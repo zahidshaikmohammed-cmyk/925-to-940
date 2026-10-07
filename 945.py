@@ -424,7 +424,14 @@ def cmd_scan(args, weights) -> int:
     if not is_trading_day(today):
         print(f"NOT A NORMAL NSE TRADING DAY: {today}")
         return 20
-    _scan_banner(cfg, scanner)
+    setups_only = not args.score and not args.no_setups
+    if setups_only:
+        print("=" * 72)
+        print("PSYGRID 945 -- SETUP ENGINE (opening range breakout, first-half-hour momentum, VWAP pullback)")
+        print("=" * 72)
+        print("Signal only -- this program never places orders. The 945 score signals are off (--score turns them on).")
+    else:
+        _scan_banner(cfg, scanner)
     setups = prepare_setups(args, today, scanner.cost_pct)
     done = journal.trades(today.isoformat())
     if done:
@@ -477,7 +484,7 @@ def cmd_scan(args, weights) -> int:
                 scanned.add(cutoff)
                 continue
             warned = None
-            if cutoff >= score_from:
+            if cutoff >= score_from and not setups_only:
                 events, summary = scanner.step(raw, cutoff)
             else:
                 events, summary = [], None
@@ -494,7 +501,7 @@ def cmd_scan(args, weights) -> int:
                     print(render_update(ev), flush=True)
             if summary is not None:
                 print(render_heartbeat(summary, cfg), flush=True)
-            else:
+            elif not setups_only:
                 print(f"[{cutoff:%H:%M}] setups watching the open (945 score scan starts {cfg.start:%H:%M})", flush=True)
             for ev in events:
                 if ev.kind == "SIGNAL":
@@ -515,6 +522,8 @@ def cmd_scan(args, weights) -> int:
                         if ev.kind in ("STOP", "EXIT_VWAP", "SQUARE_OFF") and not muted:
                             beep()
                         print(render_setup_update(ev, setups.stats), flush=True)
+                    if setups_only:
+                        print(setups.heartbeat(cutoff), flush=True)
                 except Exception as exc:                # a setup bug never stops the scanner
                     print(f"[{cutoff:%H:%M}] setup engine error: {type(exc).__name__}: {exc}")
     except KeyboardInterrupt:
@@ -523,14 +532,19 @@ def cmd_scan(args, weights) -> int:
             saved = save_session(args.data_dir, today, *latest) or saved
         if saved:
             print(f"Session saved for replay: {saved}")
-        print(render_day(scanner.trades))
+        if not setups_only:
+            print(render_day(scanner.trades))
         if setups:
             print(setups.summary())
         return 0
-    print(render_day(scanner.trades))
+    if not setups_only:
+        print(render_day(scanner.trades))
     if setups:
         print(setups.summary())
-    print(f"Journal: {journal.path(today.isoformat())} | all trades: {journal.root / 'trades.csv'}")
+    if setups_only:
+        print(f"Journal: {Path(args.data_dir) / 'setups' / (today.isoformat() + '.jsonl')}")
+    else:
+        print(f"Journal: {journal.path(today.isoformat())} | all trades: {journal.root / 'trades.csv'}")
     if saved:
         print(f"Session saved for replay: {saved}")
     return 0
@@ -632,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--order-value", type=float, help="scan: typical order value in rupees for the cost model (default 100000)")
     p.add_argument("--verbose", action="store_true", help="scan replay: print every scan and signal")
     p.add_argument("--no-archive", action="store_true", help="scan: do not save the session to data/sessions")
-    p.add_argument("--no-setups", action="store_true", help="scan: run without the research setups")
+    p.add_argument("--no-setups", action="store_true", help="scan: run without the research setups (implies --score)")
+    p.add_argument("--score", action="store_true", help="scan: also run the 945 score signals (off by default)")
     p.add_argument("--no-yahoo", action="store_true", help="scan: never try to download Yahoo history")
     p.add_argument("--symbols", help="bootstrap: file with the symbols to download (one per line or JSON)")
     p.add_argument("--orb-stop", default="range", choices=("range", "atr10"),

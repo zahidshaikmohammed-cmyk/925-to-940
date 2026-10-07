@@ -204,6 +204,7 @@ class SetupEngine:
             return events
         above = sum(1 for s in live if bars[s].c[ks[s] - 1] > bars[s].vwap[ks[s] - 1]) / len(live)
         regime = "UP" if above >= cfg.regime_long else ("DOWN" if above <= cfg.regime_short else "MIXED")
+        self.diag["regime"], self.diag["above_vwap"], self.diag["scanned"] = regime, above, len(live)
         t_now = now.astimezone(IST).time()
         if "ORB" in cfg.enabled and not self.orb_checked and t_now >= time(9, 20):
             self.orb_checked = True
@@ -763,6 +764,16 @@ class LiveSetups:
         for ev in events:
             self.journal.write(ev, stamp)
         return events
+
+    def heartbeat(self, cutoff: datetime) -> str:
+        armed = sum(1 for t in self.engine.trades if t.state == "ARMED")
+        open_ = [t for t in self.engine.trades if t.state == "OPEN"]
+        d = self.engine.diag
+        mkt = (f"market {d['regime']} ({d['above_vwap']:.0%} of stocks above VWAP)" if "regime" in d
+               else "waiting for the first 5-min candle")
+        live = ", ".join(f"{t.symbol} {t.direction}" for t in open_[:4]) or "-"
+        return (f"[{cutoff:%H:%M}] setups: {d.get('scanned', 0)} liquid stocks scanned | {mkt} | "
+                f"{armed} armed, {len(open_)} open: {live}")
 
     def summary(self) -> str:
         trades = self.engine.trades

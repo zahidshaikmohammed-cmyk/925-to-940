@@ -327,8 +327,11 @@ class CliTests(unittest.TestCase):
             code, out = self.run_cli(mod, ["--data-dir", tmp, "--no-archive"])
             self.assertEqual(code, 0, out)
             self.assertIn("Setups      :", out)
-            self.assertIn("setups watching the open", out)
-            self.assertIn("[09:30]", out)
+            self.assertIn("SETUP ENGINE", out)
+            self.assertIn("945 score signals are off", out)
+            self.assertIn("[09:30] setups:", out)
+            self.assertNotIn("945 SCAN SIGNAL", out)
+            self.assertNotIn("green | top:", out)                # no 945 score heartbeat
             self.assertIn("SETUPS TODAY", out)
             self.assertTrue((Path(tmp) / "universe.json").exists())
             j = Path(tmp) / "setups" / f"{day.isoformat()}.jsonl"
@@ -587,3 +590,24 @@ class FeedOnlyTests(unittest.TestCase):
         self.assertTrue(fhm)
         self.assertTrue(all(t.direction == "LONG" for t in fhm))
         self.assertIn("day-one proxy", fhm[0].facts[0])
+
+
+class ScoreFlagTests(unittest.TestCase):
+    def test_score_flag_brings_back_the_945_signals(self):
+        from tests.test_945_scan import FakeFeed, TEST_CFG, session
+        spec = importlib.util.spec_from_file_location("psygrid_945_scoreflag", ROOT / "945.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        feed = FakeFeed(*session())
+        mod.now, mod.sleep, mod.fetch = feed.now, feed.sleep, feed.fetch
+        mod.is_trading_day = lambda d: True
+        mod.beep = mod.alert_beep = lambda: None
+        mod.probe_yahoo = lambda: False
+        mod.scan_config = lambda args: replace(TEST_CFG, stop_scanning=time(9, 35))
+        with tempfile.TemporaryDirectory() as tmp:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mod.main(["--data-dir", tmp, "--no-archive", "--score"])
+        out = buf.getvalue()
+        self.assertIn("PSYGRID 945 -- CONTINUOUS SCAN", out)
+        self.assertIn("green | top:", out)

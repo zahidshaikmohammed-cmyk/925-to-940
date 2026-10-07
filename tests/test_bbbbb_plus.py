@@ -73,7 +73,7 @@ class SameEngineTests(unittest.TestCase):
             cfg = run_engine.StrategyConfig()
             parsed = run_engine.parse_universe(FakeClient("x"), FakeClient("x").market(), NOW)
             parsed = run_engine.precision_screen(parsed, cfg, NOW)
-            direct = run_engine.select_global_best(run_engine.build_candidates(parsed, {}, cfg))
+            direct, *_ = run_engine.choose(parsed, run_engine.build_candidates(parsed, {}, cfg), cfg, NOW)
         self.assertEqual((spy.best.symbol, spy.best.side, spy.best.entry, spy.best.stop),
                          (direct.symbol, direct.side, direct.entry, direct.stop))
 

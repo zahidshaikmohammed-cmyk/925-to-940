@@ -94,6 +94,37 @@ class StrategyConfig:
     checkpoint_slack: float = 1.5   # x the expected minutes to reach +0.5R
     time_stop_multiple: float = 2.0  # x the expected minutes to reach the target
     intraday_exit_time: str = "15:15"
+    # Precision layer (precision.py). Starting values; grade_signals.py measures them.
+    breadth_long_only: float = 0.60    # >= this share of stocks above VWAP -> longs only
+    breadth_short_only: float = 0.40   # <= this share -> shorts only
+    persistence_window_bars: int = 60
+    vwap_cross_window_bars: int = 30
+    structure_pairs: int = 6           # 5-minute bar pairs checked for HH/HL (LL/LH)
+    opening_range_end: str = "09:30"
+    climax_volume_multiple: float = 4.0
+    climax_range_atr: float = 2.0
+    rejection_wick_ratio: float = 0.6
+    failed_break_count: int = 3
+    late_day_after: str = "14:00"
+    late_day_extended_pct: float = 6.0
+    penalty_climax: float = 15.0
+    penalty_rejection: float = 10.0
+    penalty_failed_breaks: float = 10.0
+    penalty_late_extended: float = 15.0
+    p_vwap_hold: float = 0.25
+    p_vwap_crosses: float = 0.10
+    p_structure: float = 0.20
+    p_volume: float = 0.15
+    p_opening_range: float = 0.15
+    p_relative_strength: float = 0.15
+    min_trend_persistence: float = 60.0
+    neutral_extra_persistence: float = 10.0
+    lunch_extra_persistence: float = 10.0
+    no_entry_before: str = "09:20"
+    no_entry_after: str = "14:45"
+    lunch_start: str = "12:00"
+    lunch_end: str = "13:30"
+    conviction_setup_weight: float = 0.4  # conviction = 0.4 x setup score + 0.6 x persistence
     # A Tier 1/2 pick below this score is reported LOW_CONFIDENCE_WEAK, not SIGNAL_READY.
     min_signal_score: float = 55.0
 
@@ -124,6 +155,14 @@ class StrategyConfig:
             raise ValueError("atr_period must be >= 2")
         if not 0 < self.vwap_sweet_spot_atr < self.max_extension_from_vwap_atr - 0.25:
             raise ValueError("vwap_sweet_spot_atr must sit below max_extension_from_vwap_atr - 0.25")
+        persistence_weights = (
+            self.p_vwap_hold, self.p_vwap_crosses, self.p_structure,
+            self.p_volume, self.p_opening_range, self.p_relative_strength,
+        )
+        if abs(sum(persistence_weights) - 1.0) > 1e-9:
+            raise ValueError("persistence weights must sum to 1.0")
+        if not 0.0 <= self.breadth_short_only < self.breadth_long_only <= 1.0:
+            raise ValueError("invalid breadth thresholds")
         if self.max_candle_age_minutes < 0 or self.min_median_turnover_rupees < 0:
             raise ValueError("precision screen thresholds must be >= 0")
         if self.http_timeout_seconds <= 0:

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from config import StrategyConfig
 from psygrid_client import ENDPOINT_PATH, EXPECTED_UNIVERSE, Health, PsygridClient, StockData
+from precision import Breadth, Pick, market_breadth, rank_picks
 from strategy_930 import Candidate, Candle, evaluate_tiers
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -357,6 +358,65 @@ def select_global_best(candidates: list[Candidate]) -> Candidate | None:
     )[0]
 
 
+SECTOR_ABSENT = "sector_data=ABSENT_WEIGHT_REDISTRIBUTED"
+
+
+def choose(
+    parsed: dict[str, StockData], candidates: list[Candidate], cfg: StrategyConfig, now: datetime
+) -> tuple[Candidate | None, Pick | None, list[Pick], Breadth]:
+    """The engine's #1: the highest-conviction Tier 1/2 pick that passes every precision rule.
+
+    With no tradable pick, the highest-conviction near-miss is shown with its
+    blockers; with no Tier 1/2 setup at all, the old tier/score #1 (Tier 3).
+    """
+    breadth = market_breadth((d.candles for d in parsed.values() if d.health.healthy), cfg)
+    candles = {symbol: d.candles for symbol, d in parsed.items()}
+    has_sector = {c.symbol: SECTOR_ABSENT not in c.reasons for c in candidates}
+    picks = rank_picks(candidates, candles, has_sector, breadth, now, cfg)
+    selected = select_global_best([picks[0].candidate] if picks else candidates)
+    pick = picks[0] if picks and selected is picks[0].candidate else None
+    return selected, pick, picks, breadth
+
+
+def final_status(selected: Candidate, pick: Pick | None) -> str:
+    if pick is None:
+        return "LOW_CONFIDENCE_FORCED"
+    if pick.tradable:
+        return "SIGNAL_READY"
+    if any(b.startswith("no ") for b in pick.blockers):
+        return "NO_NEW_ENTRIES"
+    return "NO_PRECISION_SETUP"
+
+
+def print_breadth(b: Breadth) -> None:
+    print(f"MARKET       : {b.above_vwap * 100:.0f}% of {b.counted} liquid stocks above VWAP -> {b.regime}")
+
+
+def print_persistence(pick: Pick) -> None:
+    p = pick.persistence
+    print(f"PERSISTENCE  : {p.score:.1f}/100 | CONVICTION {pick.conviction:.1f}/100")
+    print(f"  VWAP HOLD  : {p.vwap_hold * 100:.0f}% of recent candles on the trade's side | {p.vwap_crosses} crosses / 30 min")
+    print(f"  STRUCTURE  : {p.structure * 100:.0f}% of 5-min bars making {'HH/HL' if pick.candidate.side == 'LONG' else 'LH/LL'}")
+    print(f"  VOLUME     : {p.volume_agreement * 100:.0f}% of directional volume moving the trade's way")
+    print(f"  OPEN RANGE : {p.opening_range * 100:.0f}% (100 = held beyond the 09:15-09:29 range)")
+    print(f"  RS AGREE   : {p.rs_agreement * 100:.0f}%")
+    if p.warnings:
+        print(f"  WARNINGS   : {', '.join(p.warnings)} (-{p.penalty:.0f})")
+    if pick.blockers:
+        print(f"  BLOCKED BY : {' | '.join(pick.blockers)}")
+
+
+def print_picks(picks: list[Pick], limit: int = 5) -> None:
+    if not picks:
+        return
+    print("\nRANKING (tradable first, by conviction):")
+    for i, k in enumerate(picks[:limit], 1):
+        c = k.candidate
+        tag = "TRADE" if k.tradable else "skip: " + ", ".join(k.blockers)
+        print(f"  {i}. {c.symbol:<14} {c.side:<5} T{c.tier} conviction={k.conviction:5.1f} "
+              f"persist={k.persistence.score:5.1f} setup={c.score:5.1f} -> {tag}")
+
+
 def preflight(client: PsygridClient) -> tuple[bool, dict[str, dict]]:
     """Validate the single atomic 990-stock public endpoint."""
     results = client.preflight_all()
@@ -514,15 +574,26 @@ def main(argv: list[str] | None = None) -> int:
     tier3 = [c for c in candidates if c.tier == 3]
     print(f"HYPOTHESES   : {len(candidates)} total | T1={len(strict)} | T2={len(tier2)} | T3={len(tier3)}")
 
-    selected = select_global_best(candidates)
+    selected, pick, picks, breadth = choose(parsed, candidates, cfg, scan_time)
     if selected is None:
         print("FATAL: no directional hypothesis could be calculated from the available data.")
         audit.event("FATAL_NO_CANDIDATE", healthy=len(healthy), received=len(parsed))
         return 32
+    status = final_status(selected, pick)
 
-    print_candidate("🏆 #1 BEST SIGNAL FROM AVAILABLE HEALTHY STOCKS", selected)
+    print_breadth(breadth)
+    title = {
+        "SIGNAL_READY": "🏆 #1 PRECISION SIGNAL",
+        "NO_PRECISION_SETUP": "⛔ NO PRECISION SETUP NOW - closest candidate (DO NOT TRADE)",
+        "NO_NEW_ENTRIES": "⛔ OUTSIDE THE ENTRY WINDOW - closest candidate (DO NOT TRADE)",
+        "LOW_CONFIDENCE_FORCED": "⚠ FORCED PICK - no Tier 1/2 setup anywhere (DO NOT TRADE at size)",
+    }[status]
+    print_candidate(title, selected)
+    if pick is not None:
+        print_persistence(pick)
     selected_data = parsed.get(selected.symbol)
-    trigger = None
+    trigger = trigger_target = None
+    timing = None
     if selected_data and selected_data.candles:
         latest_bar = selected_data.candles[-1]
         print(f"LATEST CANDLE: {latest_bar.ts:%Y-%m-%d %H:%M:%S %Z}")
@@ -540,24 +611,27 @@ def main(argv: list[str] | None = None) -> int:
             qty = int(args.risk_rupees // per_share) if per_share > 0 else 0
             print(f"QUANTITY     : {qty} shares = ₹{args.risk_rupees:.0f} risk at ₹{per_share:.2f}/share")
         fill_time = max(scan_time, latest_bar.ts.astimezone(IST) + timedelta(minutes=1))
-        print_exit_timing(
-            exit_timing(selected, selected_data.candles, trigger, trigger_target, fill_time, cfg), fill_time
-        )
+        timing = exit_timing(selected, selected_data.candles, trigger, trigger_target, fill_time, cfg)
+        print_exit_timing(timing, fill_time)
     print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
-    print_shortlist(candidates)
-    status = signal_status(selected, cfg)
-    if status == "LOW_CONFIDENCE_FORCED":
-        print("\nWARNING: no stock passed the Tier 1/2 pattern gates. This is a forced pick:")
-        print("         skip it or trade minimum size.")
-    elif status == "LOW_CONFIDENCE_WEAK":
-        print(f"\nWARNING: best real setup scores {selected.score:.1f} < {cfg.min_signal_score:.0f}. "
-              "Weak edge: skip it or trade minimum size.")
+    print_picks(picks)
+    if not picks:
+        print_shortlist(candidates)
     print(f"\nSTATUS: {status}")
+    if status != "SIGNAL_READY":
+        print("ACTION: no trade. Rerun in a few minutes; a precision signal needs a Tier 1/2 setup,")
+        print("        the market on its side, and a trend that is holding (persistence).")
     print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
     audit.event(
         status,
         trigger=trigger,
+        trigger_target=trigger_target,
+        exit_timing=asdict(timing) if timing else None,
+        breadth=asdict(breadth),
+        persistence=asdict(pick.persistence) if pick else None,
+        conviction=pick.conviction if pick else None,
+        blockers=list(pick.blockers) if pick else None,
         scan_time=scan_time.isoformat(),
         universe=len(parsed),
         healthy=len(healthy),

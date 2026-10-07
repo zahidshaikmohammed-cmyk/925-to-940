@@ -91,9 +91,18 @@ class FeedAndTriggerTests(unittest.TestCase):
         c = Candidate("RICOAUTO", "SHORT", 95.0, 120.91, 121.83, 119.07, 0, 1.9, 2.15, 0.53, 0.24,
                       1.4, 1.4, 1.0, 0.85, 0.17, 121.5, 1, ())
         last = Candle(NOW, 120.95, 121.0, 120.80, 120.91, 5000)
-        trigger, rr = run_engine.entry_trigger(c, last)
+        trigger, target = run_engine.entry_trigger(c, last, StrategyConfig())
         self.assertEqual(trigger, 120.80)
-        self.assertAlmostEqual(rr, (120.80 - 119.07) / (121.83 - 120.80))
+        # Same stop, so the target moves with the trigger and keeps 2R.
+        self.assertAlmostEqual(target, 120.80 - 2.0 * (121.83 - 120.80))
+
+    def test_long_trigger_keeps_two_r_like_the_ltm_signal(self):
+        c = Candidate("LTM", "LONG", 64.9, 3988.0, 3980.1425, 4003.715, 0, 0.36, 3.43, 0.51, 0.25,
+                      0.65, 0.5, 0.89, 0.67, 2.45, 3980.5, 2, ())
+        last = Candle(NOW, 3986.0, 3989.40, 3985.0, 3988.0, 5000)
+        trigger, target = run_engine.entry_trigger(c, last, StrategyConfig())
+        self.assertEqual(trigger, 3989.40)
+        self.assertAlmostEqual((target - trigger) / (trigger - c.stop), 2.0)
 
 
 class NotLiveFeedClient(PsygridClient):

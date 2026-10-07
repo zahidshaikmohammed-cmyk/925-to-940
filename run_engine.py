@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, time as dtime
 from pathlib import Path
 from statistics import median
@@ -210,16 +210,19 @@ def feed_is_live(meta: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def entry_trigger(c: Candidate, last: Candle) -> tuple[float, float]:
-    """(trigger, R multiple at the trigger): enter only on a break of the last candle.
+def entry_trigger(c: Candidate, last: Candle, cfg: StrategyConfig) -> tuple[float, float]:
+    """(trigger, target from the trigger): enter only on a break of the last candle.
 
     SHORT arms below the last completed candle's low, LONG above its high, so
-    the order fills only if price is still moving the signal's way.
+    the order fills only if price is still moving the signal's way. The stop is
+    unchanged, so the target is re-measured from the trigger to keep the same
+    minimum reward (``minimum_rr`` x risk, at least ``minimum_target_atr`` x ATR).
     """
-    trigger = last.low if c.side == "SHORT" else last.high
+    side = -1 if c.side == "SHORT" else 1
+    trigger = last.low if side == -1 else last.high
     risk = abs(trigger - c.stop)
-    reward = abs(c.target - trigger)
-    return trigger, (reward / risk if risk > 0 else 0.0)
+    target = trigger + side * max(cfg.minimum_rr * risk, cfg.minimum_target_atr * c.atr_value)
+    return trigger, target
 
 
 def build_candidates(data: dict[str, StockData], sectors: dict[str, str], cfg: StrategyConfig) -> list[Candidate]:
@@ -315,6 +318,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--expected-universe", type=int, default=EXPECTED_UNIVERSE, help="universe_size the feed must declare")
     parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds (default: strategy config)")
+    parser.add_argument("--min-turnover", type=float, default=None,
+                        help="minimum median rupee turnover per minute (default 500000; 0 = off)")
     parser.add_argument("--risk-rupees", type=float, default=None, help="rupees you accept losing at the stop; prints the share quantity")
     args = parser.parse_args(argv)
 
@@ -322,6 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_self_test()
 
     cfg = StrategyConfig()
+    if args.min_turnover is not None:
+        cfg = replace(cfg, min_median_turnover_rupees=max(0.0, args.min_turnover))
     cfg.validate()
     audit = Audit()
     timeout = args.timeout if args.timeout is not None else cfg.http_timeout_seconds
@@ -434,10 +441,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LATEST CANDLE: {latest_bar.ts:%Y-%m-%d %H:%M:%S %Z}")
         print(f"CANDLE COUNT : {len(selected_data.candles)}")
         print(f"LATEST CLOSE : ₹{latest_bar.close:.4f}")
-        trigger, trigger_rr = entry_trigger(selected, latest_bar)
+        trigger, trigger_target = entry_trigger(selected, latest_bar, cfg)
         word = "BELOW" if selected.side == "SHORT" else "ABOVE"
-        print(f"TRIGGER      : enter only if price trades {word} ₹{trigger:.2f} "
-              f"(stop-entry order, {trigger_rr:.2f}R from there)")
+        print(f"TRIGGER      : enter only if price trades {word} ₹{trigger:.2f} (stop-entry order)")
+        print(f"TRIGGER PLAN : SL ₹{selected.stop:.2f} | TP ₹{trigger_target:.2f} "
+              f"({abs(trigger_target - trigger) / max(abs(trigger - selected.stop), 1e-12):.2f}R from the trigger)")
         print(f"               cancel if not filled within {cfg.trigger_valid_candles} candle(s) "
               f"or if ₹{selected.stop:.2f} trades first")
         if args.risk_rupees:

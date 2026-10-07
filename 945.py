@@ -251,7 +251,6 @@ def _scan_banner(cfg: ScanConfig, scanner: Scanner) -> None:
 
 
 def cmd_scan(args, weights) -> int:
-    from dataclasses import replace
     cfg = scan_config(args)
     sectors, _ = load_sectors(args.sector_map)
     scanner = Scanner(cfg, weights, sectors)
@@ -277,6 +276,8 @@ def cmd_scan(args, weights) -> int:
         print(f"Waiting for {cfg.start:%H:%M} IST (the first scan uses the 09:15-09:29 candles)...")
     scanned: set = set()
     warned = None
+    latest = None
+    saved = None
     try:
         while True:
             t = now()
@@ -308,6 +309,9 @@ def cmd_scan(args, weights) -> int:
             warned = None
             events, summary = scanner.step(raw, cutoff)
             scanned.add(cutoff)
+            latest = (stocks, index)
+            if not args.no_archive and (cutoff.minute % 15 == 0 or cutoff == last):
+                saved = save_session(args.data_dir, today, stocks, index) or saved
             for ev in events:                          # trade updates first, then the scan line
                 journal.write(ev)
                 if ev.kind != "SIGNAL":
@@ -320,35 +324,36 @@ def cmd_scan(args, weights) -> int:
                     print(render_signal(ev.trade), flush=True)
     except KeyboardInterrupt:
         print("\nStopped by you (Ctrl+C). Everything so far is saved in the journal.")
+        if latest and not args.no_archive:
+            saved = save_session(args.data_dir, today, *latest) or saved
+        if saved:
+            print(f"Session saved for replay: {saved}")
         print(render_day(scanner.trades))
         return 0
     print(render_day(scanner.trades))
     print(f"Journal: {journal.path(today.isoformat())} | all trades: {journal.root / 'trades.csv'}")
-    # Save the full session so it can be replayed with --scan-replay.
-    sel = replace(SelectorConfig(), sessions_dir=str(Path(args.data_dir) / "sessions"))
-    target = Path(sel.sessions_dir) / f"{today.isoformat()}.json.gz"
-    if target.exists() or args.no_archive:
-        return 0
-    print("Saving today's full session for replay after 15:31 (Ctrl+C to skip)...")
-    try:
-        while now() < at(sel.archive_after):
-            sleep(min(30.0, (at(sel.archive_after) - now()).total_seconds() + 0.5))
-        for _ in range(5):
-            try:
-                print(f"ARCHIVED {lifecycle_for_archive(args, sel, weights).archive_session()}")
-                break
-            except Exception as exc:
-                print(f"archive failed ({exc}); retrying in 60 s")
-                sleep(60)
-    except KeyboardInterrupt:
-        print("Archive skipped.")
+    if saved:
+        print(f"Session saved for replay: {saved}")
     return 0
 
 
-def lifecycle_for_archive(args, sel, weights) -> Lifecycle:
-    return Lifecycle(sel, weights, str(Path(args.data_dir) / "psygrid_945.sqlite"), args.base_url, {}, "none",
-                     is_trading_day, Clock(lambda: now(), lambda s: sleep(s)), fetch=lambda b: fetch(b),
-                     out=print)
+def save_session(data_dir: str, day, stocks, index) -> Path | None:
+    """Write the latest feed snapshot to data/sessions/DAY.json.gz (same format as
+    --daemon's archive). Written atomically, and never with an empty or other-day feed,
+    so a later empty feed (PSYGRID clears candles after the close) cannot overwrite it."""
+    import gzip
+    import os
+    raw = parse_payload(stocks, index)
+    if raw.session_date != day or not any(len(x) for x in raw.stocks.values()):
+        return None
+    target = Path(data_dir) / "sessions" / f"{day.isoformat()}.json.gz"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp")
+    tmp.write_bytes(gzip.compress(json.dumps({"archived_at": now().isoformat(), "stocks_payload": stocks,
+                                              "index_payload": index}, separators=(",", ":")).encode(),
+                                  compresslevel=5))
+    os.replace(tmp, target)
+    return target
 
 
 def cmd_scan_replay(args, weights) -> int:
@@ -421,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--risk-rupees", type=float, help="scan: print a share quantity for this rupee risk")
     p.add_argument("--order-value", type=float, help="scan: typical order value in rupees for the cost model (default 100000)")
     p.add_argument("--verbose", action="store_true", help="scan replay: print every scan and signal")
-    p.add_argument("--no-archive", action="store_true", help="scan: do not wait to save the session after the close")
+    p.add_argument("--no-archive", action="store_true", help="scan: do not save the session to data/sessions")
     args = p.parse_args(argv)
 
     from dataclasses import replace

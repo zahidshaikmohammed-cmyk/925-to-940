@@ -134,8 +134,10 @@ signals a day, and no more signals after 2 losing trades.
 
 Everything is written to `data/scan/YYYY-MM-DD.jsonl` (every event) and
 `data/scan/trades.csv` (one row per trade, gross and net R). Restarting the same day
-resumes from the journal and never repeats a signal. After the close it waits for 15:31
-and saves the full session to `data/sessions/` (skip with `--no-archive` or Ctrl+C).
+resumes from the journal and never repeats a signal. Every 15 minutes, at the last scan
+and on Ctrl+C it saves the day's feed to `data/sessions/YYYY-MM-DD.json.gz` for replay
+(`--no-archive` turns this off). It saves during the session because the feed clears its
+candles after the close; an empty feed never overwrites a saved day.
 
 Before trusting a threshold, replay saved days through the exact same logic:
 

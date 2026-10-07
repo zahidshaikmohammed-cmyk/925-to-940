@@ -306,6 +306,30 @@ class CliTests(unittest.TestCase):
                     if json.loads(x)["kind"] == "SIGNAL"]
             self.assertEqual(len(sigs), len(set(sigs)))
 
+    def test_live_scan_saves_the_session_and_an_empty_feed_cannot_overwrite_it(self):
+        mod = self.load()
+        feed = FakeFeed(*session())
+        mod.now, mod.sleep, mod.fetch = feed.now, feed.sleep, feed.fetch
+        mod.is_trading_day = lambda d: True
+        mod.beep = mod.alert_beep = lambda: None
+        mod.scan_config = lambda args: replace(TEST_CFG, stop_scanning=time(9, 50))
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self.run_cli(mod, ["--data-dir", tmp])
+            self.assertEqual(code, 0, out)
+            saved = Path(tmp) / "sessions" / f"{DAY.isoformat()}.json.gz"
+            self.assertTrue(saved.exists(), out)
+            self.assertIn("Session saved for replay", out)
+            before = saved.read_bytes()
+            from intelligence.selector_data import load_session_file
+            raw = load_session_file(saved)
+            self.assertEqual(max(s.ts[-1] for s in raw.stocks.values() if len(s)), at(9, 49))
+            # after the close the feed is empty: nothing is overwritten
+            empty = {"stocks": {}, "session": {"date": DAY.isoformat()}}
+            self.assertIsNone(mod.save_session(tmp, DAY, empty, None))
+            self.assertEqual(saved.read_bytes(), before)
+            code, out = self.run_cli(mod, ["--scan-replay", str(saved)])
+            self.assertEqual(code, 0, out)
+
     def test_stale_feed_is_never_scanned(self):
         mod = self.load()
         feed = FakeFeed(*session())

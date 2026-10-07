@@ -181,7 +181,32 @@ the engine is waiting for. Journal: `data/setups/YYYY-MM-DD.jsonl` and `data/set
 `--no-setups` runs the scan without them.
 
 Caveats: Yahoo's 5-minute volume and PSYGRID's 1-minute volume can differ slightly, which
-shifts RVOL; 60 days is one market regime, so re-run `--setup-backtest` weekly.
+shifts RVOL. At 09:20 the scan prints a VOLUME CHECK warning if the median stock's RVOL is
+far from 1x. 60 days is one market regime, so re-run `--setup-backtest` weekly.
+
+### Entering without delay
+
+A trigger is confirmed when the 1-minute candle that crossed the level closes, so the
+TRIGGERED beep comes about a minute after the cross. Place a stop-entry order at the
+ARMED level instead (it is printed before the move, with its stop and its "until" time):
+the exchange fills you at the level and the beep only confirms it.
+
+### Daily audit (after the close)
+
+```powershell
+python 945.py --audit                  # today; --date 2026-10-08 for another day
+```
+
+It re-runs the setup engine minute by minute over the day's saved feed, exactly as the
+live scan ran it, and prints (and saves to `data/audit/DATE.txt`):
+
+1. coverage: feed stocks, stocks with history, liquid stocks, median RVOL;
+2. every setup armed, triggered and closed, with R after costs;
+3. live run vs replay: any setup the live scan missed (feed gap, scan not running) or
+   armed at different levels;
+4. alert delay for every live trigger;
+5. near misses: stocks that failed exactly one condition, and which one;
+6. the day's 10 biggest moves and what the engine said about each.
 
 ## 945.py --daemon -- 09:45 research decision (model 945-V1)
 

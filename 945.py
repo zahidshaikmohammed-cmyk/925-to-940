@@ -334,6 +334,29 @@ def cmd_setup_backtest(args) -> int:
     return 0
 
 
+def cmd_audit(args) -> int:
+    from intelligence.selector_scan import round_trip_cost_pct
+    from intelligence.setup_audit import audit
+    day = args.date or now().date().isoformat()
+    session = Path(args.data_dir) / "sessions" / f"{day}.json.gz"
+    hist = history_dir(args) / HISTORY_FILE
+    if not session.exists():
+        print(f"No saved session for {day} ({session}). The scan saves it during the day.")
+        return 40
+    if not hist.exists():
+        print("No history yet. Run: python 945.py --bootstrap")
+        return 50
+    raw = load_session_file(session)
+    text = audit(raw, HistoryIndex(load_history(hist)), setup_config(args), round_trip_cost_pct(scan_config(args)),
+                 Path(args.data_dir) / "setups" / f"{day}.jsonl")
+    print(text)
+    out = Path(args.data_dir) / "audit" / f"{day}.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print(f"Saved: {out}")
+    return 0
+
+
 def previous_trading_day(day):
     d = day - timedelta(days=1)
     while not is_trading_day(d):
@@ -368,7 +391,7 @@ def prepare_setups(args, today, cost_pct):
         print(f"  {k} {name:<38} {record_line(stats, k)}")
     from intelligence.selector_scan import round_trip_cost_pct  # noqa: F401  (cost passed in)
     engine = SetupEngine(setup_config(args), cost_pct)
-    return LiveSetups(engine, base, stats, SetupJournal(Path(args.data_dir) / "setups"), today)
+    return LiveSetups(engine, base, stats, SetupJournal(Path(args.data_dir) / "setups"), today, clock=lambda: now())
 
 
 def save_universe(args, stocks) -> None:
@@ -469,7 +492,11 @@ def cmd_scan(args, weights) -> int:
                     print(render_signal(ev.trade), flush=True)
             if setups:
                 try:
-                    for ev in setups.on_scan(raw.stocks, cutoff):
+                    setup_events = setups.on_scan(raw.stocks, cutoff)
+                    warning = setups.rvol_warning()
+                    if warning:
+                        print(warning, flush=True)
+                    for ev in setup_events:
                         muted = setups.muted(ev.trade["setup"])
                         if ev.kind == "TRIGGERED" and not muted:
                             alert_beep()
@@ -577,8 +604,9 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--scan-replay", nargs="+", metavar="PATH", help="run the scan over saved session files/dirs")
     g.add_argument("--bootstrap", action="store_true", help="download 60 days of 5-min history (Yahoo) for the setups")
     g.add_argument("--setup-backtest", action="store_true", help="backtest the research setups on the downloaded history")
+    g.add_argument("--audit", action="store_true", help="after the close: re-run the day's setups and check the live run (--date D)")
     g.add_argument("--backtest", nargs="+", metavar="PATH", help="session files/dirs for walk-forward replay")
-    p.add_argument("--date", help="YYYY-MM-DD for --show / --verify (default today)")
+    p.add_argument("--date", help="YYYY-MM-DD for --show / --verify / --audit (default today)")
     p.add_argument("--mode", default="live", choices=("live", "replay", "backtest"), help="decision mode for --show")
     p.add_argument("--data-dir", default="data", help="root for the store, frozen inputs, archives and reports")
     p.add_argument("--db", default=None, help="SQLite store (default DATA_DIR/psygrid_945.sqlite; backtests: DATA_DIR/backtest_945.sqlite)")
@@ -614,8 +642,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_bootstrap(args)
     if args.setup_backtest:
         return cmd_setup_backtest(args)
+    if args.audit:
+        return cmd_audit(args)
     if not any((args.daemon, args.decide_only, args.status, args.evaluate, args.verify, args.show, args.research,
-                args.archive, args.report, args.benchmark, args.self_test, args.replay, args.backtest)):
+                args.archive, args.report, args.benchmark, args.self_test, args.replay, args.backtest, args.audit)):
         return cmd_scan(args, weights)
     if args.self_test:
         import unittest

@@ -28,6 +28,7 @@ exit counts the stop. The same code runs live and in the backtest.
 """
 from __future__ import annotations
 
+import bisect
 import csv
 import json
 from dataclasses import asdict, dataclass, field
@@ -96,11 +97,8 @@ class DayBars:
     atr: list
 
     def done(self, now: datetime) -> int:
-        """Number of bars complete at `now`."""
-        k = 0
-        while k < len(self.ts) and self.ts[k] + FIVE <= now:
-            k += 1
-        return k
+        """Number of bars complete at `now` (bars are in time order)."""
+        return bisect.bisect_right(self.ts, now - FIVE)
 
 
 def build_day(symbol: str, bars: list[Bar], atr_bars: int = 14) -> DayBars:
@@ -165,6 +163,7 @@ class SetupTrade:
     net_r: float | None = None
     net_pct: float | None = None
     seen_to: str = ""                  # bars before this time are processed
+    vwap_checked_to: str = ""          # VWT: 5-min bars ending at or before this are checked
 
     @property
     def live(self) -> bool:
@@ -198,6 +197,8 @@ class SetupEngine:
         self.done: set = set()             # (setup, symbol) already armed today
         self.orb_checked = self.fhm_checked = False
         self.vwt_seen: dict = {}           # symbol -> bars already evaluated for VWT
+        self.near: list[dict] = []         # stocks that failed exactly one condition
+        self.diag: dict = {}               # e.g. median RVOL at 09:20 (volume-scale check)
 
     def restore(self, day: date, trades: list[SetupTrade]) -> None:
         self.reset(day)
@@ -235,6 +236,18 @@ class SetupEngine:
         return events
 
     # ---------------------------------------------------------------- arming
+    def _cost_r(self, trigger: float, stop: float) -> float:
+        risk = abs(trigger - stop)
+        return self.cost_pct / 100 * trigger / risk if risk > 0 else float("inf")
+
+    def _note(self, setup: str, now: datetime, sym: str, d: int, checks: list) -> None:
+        """Remember a stock that failed exactly one condition (for the daily audit)."""
+        failed = [(name, detail) for name, ok, detail in checks if not ok]
+        if len(failed) == 1:
+            self.near.append({"setup": setup, "at": now.isoformat(), "symbol": sym,
+                              "direction": "LONG" if d > 0 else "SHORT",
+                              "failed": failed[0][0], "detail": failed[0][1]})
+
     def _arm(self, setup, sym, d, trigger, stop, now, until, facts) -> SetupEvent | None:
         risk = abs(trigger - stop)
         if risk <= 0 or d * (trigger - stop) <= 0:
@@ -253,31 +266,48 @@ class SetupEngine:
         return SetupEvent("ARMED", now.isoformat(), t.to_dict())
 
     def _arm_orb(self, bars, base, ks, live, now):
+        """Paper order: RVOL >= threshold, top N by RVOL, then trade the first candle's direction."""
         cfg = self.cfg
-        cands = []
+        rvols = []
         for s in live:
             b, bl = bars[s], base[s]
             if b.ts[0].time() != SESSION_OPEN or not bl.rvol_base:
                 continue
-            rvol = b.v[0] / bl.rvol_base
-            rng, body = b.h[0] - b.l[0], b.c[0] - b.o[0]
-            if rvol < cfg.orb_rvol or rng <= 0 or abs(body) < cfg.orb_body * rng:
-                continue
-            cands.append((rvol, s))
-        cands.sort(reverse=True)
+            rvols.append((b.v[0] / bl.rvol_base, s))
+        if rvols:
+            self.diag["orb_median_rvol"] = round(median(r for r, _ in rvols), 3)
+            self.diag["orb_stocks_measured"] = len(rvols)
+        rvols.sort(reverse=True)
+        ranked = {s: i + 1 for i, (_, s) in enumerate(rvols)}
+        in_play = [(r, s) for r, s in rvols if r >= cfg.orb_rvol]
         events = []
         until = datetime.combine(now.date(), cfg.orb_until, IST)
-        for rank, (rvol, s) in enumerate(cands[:cfg.orb_top], 1):
+        for r, s in rvols:
             b, bl = bars[s], base[s]
-            d = 1 if b.c[0] > b.o[0] else -1
+            rng = b.h[0] - b.l[0]
+            if rng <= 0:
+                continue
+            d = 1 if b.c[0] >= b.o[0] else -1
+            body = abs(b.c[0] - b.o[0]) / rng
             trigger = b.h[0] if d > 0 else b.l[0]
             if cfg.orb_stop == "atr10" and bl.atr_daily:
                 stop = trigger - d * cfg.orb_atr_frac * bl.atr_daily
             else:
                 stop = b.l[0] if d > 0 else b.h[0]
+            cost_r = self._cost_r(trigger, stop)
+            top = ranked[s] <= cfg.orb_top and r >= cfg.orb_rvol
+            checks = [("RVOL", r >= cfg.orb_rvol, f"RVOL {r:.2f}x, needs {cfg.orb_rvol:.1f}x"),
+                      ("top-RVOL rank", ranked[s] <= cfg.orb_top or r < cfg.orb_rvol,
+                       f"RVOL rank #{ranked[s]}, needs top {cfg.orb_top}"),
+                      ("candle body", body >= cfg.orb_body, f"body {body:.0%} of range, needs {cfg.orb_body:.0%}"),
+                      ("costs", cost_r <= cfg.max_cost_r, f"costs {cost_r:.2f}R, max {cfg.max_cost_r:.2f}R")]
+            if not (top and body >= cfg.orb_body and cost_r <= cfg.max_cost_r):
+                if r >= 0.75 * cfg.orb_rvol:
+                    self._note("ORB", now, s, d, checks)
+                continue
             ev = self._arm("ORB", s, d, trigger, stop, now, until,
-                           [f"RVOL {rvol:.1f}x its 14-day median in the 09:15 bar (#{rank} of {len(cands)} stocks in play)",
-                            f"09:15 bar closed {'green' if d > 0 else 'red'}: body {abs(b.c[0] - b.o[0]) / (b.h[0] - b.l[0]):.0%} of its range"])
+                           [f"RVOL {r:.1f}x its 14-day median in the 09:15 bar (#{ranked[s]} of {len(in_play)} stocks in play)",
+                            f"09:15 bar closed {'green' if d > 0 else 'red'}: body {body:.0%} of its range"])
             if ev:
                 events.append(ev)
         return events
@@ -294,29 +324,38 @@ class SetupEngine:
         if not rows:
             return []
         mkt = median(r for _, r, _ in rows)
-        cands = []
+        scored = []
         for s, r, sd in rows:
             z = r / sd if sd > 0 else 0.0
             d = 1 if r > 0 else -1
-            if abs(z) < cfg.fhm_z or (mkt > 0) != (r > 0):
-                continue
-            if (regime == "UP" and d < 0) or (regime == "DOWN" and d > 0):
-                continue
-            cands.append((abs(z), s, r, z, d))
-        cands.sort(reverse=True)
-        events = []
-        until = datetime.combine(now.date(), cfg.fhm_until, IST)
-        for _, s, r, z, d in cands[:cfg.fhm_top]:
             b = bars[s]
             idx = [i for i in range(ks[s]) if cfg.fhm_range_start <= b.ts[i].time() < cfg.fhm_range_end]
-            if not idx:
-                continue
-            hi, lo = max(b.h[i] for i in idx), min(b.l[i] for i in idx)
-            ev = self._arm("FHM", s, d, hi if d > 0 else lo, lo if d > 0 else hi, now, until,
-                           [f"09:15-09:45 move {r * 100:+.2f}% incl. gap = {z:+.1f} s.d. of its last 14 sessions",
-                            f"market's first half-hour {mkt * 100:+.2f}% (median stock), regime {regime}"])
-            if ev:
-                events.append(ev)
+            hi = max(b.h[i] for i in idx) if idx else None
+            lo = min(b.l[i] for i in idx) if idx else None
+            trig, stop = (hi, lo) if d > 0 else (lo, hi)
+            cost_r = self._cost_r(trig, stop) if idx else float("inf")
+            checks = [("move size", abs(z) >= cfg.fhm_z, f"first half-hour {z:+.2f} s.d., needs {cfg.fhm_z:.1f}"),
+                      ("market direction", (mkt > 0) == (r > 0), f"stock {r * 100:+.2f}% vs market {mkt * 100:+.2f}%"),
+                      ("regime", not ((regime == "UP" and d < 0) or (regime == "DOWN" and d > 0)), f"regime {regime}"),
+                      ("14:30-14:45 range", bool(idx), "no candles in the range"),
+                      ("costs", cost_r <= cfg.max_cost_r, f"costs {cost_r:.2f}R, max {cfg.max_cost_r:.2f}R")]
+            scored.append((abs(z), s, r, z, d, trig, stop, checks))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        events = []
+        until = datetime.combine(now.date(), cfg.fhm_until, IST)
+        taken = 0
+        for _, s, r, z, d, trig, stop, checks in scored:
+            if all(ok for _, ok, _ in checks) and taken < cfg.fhm_top:
+                ev = self._arm("FHM", s, d, trig, stop, now, until,
+                               [f"09:15-09:45 move {r * 100:+.2f}% incl. gap = {z:+.1f} s.d. of its last 14 sessions",
+                                f"market's first half-hour {mkt * 100:+.2f}% (median stock), regime {regime}"])
+                if ev:
+                    events.append(ev)
+                    taken += 1
+            elif all(ok for _, ok, _ in checks):
+                self._note("FHM", now, s, d, checks + [("top-10 rank", False, f"ranked below the top {cfg.fhm_top}")])
+            elif abs(z) >= 0.75 * cfg.fhm_z:
+                self._note("FHM", now, s, d, checks)
         return events
 
     def _arm_vwt(self, bars, ks, live, now, regime, above):
@@ -331,36 +370,47 @@ class SetupEngine:
             self.vwt_seen[s] = k
             i = k - 1
             end = b.ts[i] + FIVE
-            if not (cfg.vwt_from <= end.time() <= cfg.vwt_to) or i < cfg.vwt_look:
+            if not (cfg.vwt_from <= end.time() <= cfg.vwt_to) or i < cfg.vwt_look or ("VWT", s) in self.done:
                 continue
             look = range(i - cfg.vwt_look + 1, i + 1)
             side = [1 if b.c[j] > b.vwap[j] else -1 for j in look]
             ups = side.count(1) / len(side)
-            d = 1 if ups >= cfg.vwt_side else (-1 if 1 - ups >= cfg.vwt_side else 0)
-            if d == 0 or ("VWT", s) in self.done:
-                continue
-            if (regime == "UP" and d < 0) or (regime == "DOWN" and d > 0):
-                continue
+            d = 1 if ups >= 0.5 else -1
+            share = ups if d > 0 else 1 - ups
             recent = side[-cfg.vwt_cross_look:]
             crosses = sum(1 for a, z in zip(recent, recent[1:]) if a != z)
-            if crosses > cfg.vwt_max_cross or d * (rets[s] - mkt) <= 0:
-                continue
             atr = b.atr[i]
-            near = (b.l[i] - b.vwap[i] if d > 0 else b.vwap[i] - b.h[i]) <= cfg.vwt_pull_atr * atr
-            held = d * (b.c[i] - b.vwap[i]) > 0
+            gap = b.l[i] - b.vwap[i] if d > 0 else b.vwap[i] - b.h[i]
             avg_v = sum(b.v[j] for j in range(i - cfg.vwt_look, i)) / cfg.vwt_look
-            if not (near and held and b.v[i] < avg_v):
+            trigger = b.h[i] if d > 0 else b.l[i]
+            stop = b.vwap[i] - d * cfg.vwt_stop_atr * atr
+            cost_r = self._cost_r(trigger, stop)
+            checks = [("trend", share >= cfg.vwt_side,
+                       f"{share:.0%} of last {cfg.vwt_look} closes {'above' if d > 0 else 'below'} VWAP, needs {cfg.vwt_side:.0%}"),
+                      ("chop", crosses <= cfg.vwt_max_cross, f"{crosses} VWAP crosses in {cfg.vwt_cross_look} bars, max {cfg.vwt_max_cross}"),
+                      ("relative strength", d * (rets[s] - mkt) > 0, f"{rets[s] * 100:+.2f}% vs market {mkt * 100:+.2f}%"),
+                      ("regime", not ((regime == "UP" and d < 0) or (regime == "DOWN" and d > 0)), f"regime {regime}"),
+                      ("pullback to VWAP", gap <= cfg.vwt_pull_atr * atr, f"{gap / atr if atr else 0:.2f} ATR from VWAP, needs <= {cfg.vwt_pull_atr}"),
+                      ("held VWAP", d * (b.c[i] - b.vwap[i]) > 0, "closed through VWAP"),
+                      ("lighter volume", b.v[i] < avg_v, f"volume {b.v[i] / avg_v if avg_v else 0:.2f}x the 12-bar average"),
+                      ("costs", cost_r <= cfg.max_cost_r, f"costs {cost_r:.2f}R, max {cfg.max_cost_r:.2f}R")]
+            if not all(ok for _, ok, _ in checks):
+                if share >= cfg.vwt_side:                      # only stocks that are trending
+                    self._note("VWT", now, s, d, checks)
                 continue
-            cands.append((d * (rets[s] - mkt), s, d, i, ups, crosses))
-        cands.sort(reverse=True)
+            cands.append((d * (rets[s] - mkt), s, d, i, share, crosses, trigger, stop))
+        cands.sort(key=lambda x: (-x[0], x[1]))
         events = []
         room = cfg.vwt_max_day - sum(1 for t in self.trades if t.setup == "VWT")
-        for rs, s, d, i, ups, crosses in cands[:max(0, min(cfg.vwt_top, room))]:
+        take = max(0, min(cfg.vwt_top, room))
+        for n, (rs, s, d, i, share, crosses, trigger, stop) in enumerate(cands):
+            if n >= take:
+                self._note("VWT", now, s, d, [("daily/bar cap", False,
+                                               f"passed every rule but the cap ({cfg.vwt_top} per bar, {cfg.vwt_max_day} a day) was full")])
+                continue
             b = bars[s]
-            trigger = b.h[i] if d > 0 else b.l[i]
-            stop = b.vwap[i] - d * cfg.vwt_stop_atr * b.atr[i]
             ev = self._arm("VWT", s, d, trigger, stop, now, now + cfg.vwt_valid_bars * FIVE,
-                           [f"{(ups if d > 0 else 1 - ups):.0%} of the last {cfg.vwt_look} 5-min closes "
+                           [f"{share:.0%} of the last {cfg.vwt_look} 5-min closes "
                             f"{'above' if d > 0 else 'below'} VWAP, {crosses} cross(es) in the last {cfg.vwt_cross_look}",
                             f"{rets[s] * 100:+.2f}% since the open vs market {mkt * 100:+.2f}%; pulled back to VWAP "
                             f"Rs {b.vwap[i]:.2f} on lighter volume",
@@ -371,6 +421,7 @@ class SetupEngine:
 
     # ---------------------------------------------------------------- management
     def _manage(self, t: SetupTrade, b: DayBars | None, fine: list[Bar] | None, now: datetime) -> list[SetupEvent]:
+        """Walk the new bars in time order: trigger, stop (first), VWAP-close exit, square-off."""
         events: list[SetupEvent] = []
         seen = datetime.fromisoformat(t.seen_to)
         until = datetime.fromisoformat(t.valid_until)
@@ -383,8 +434,29 @@ class SetupEngine:
         else:
             rows, width = [], ONE
         d = t.side
+        last_close = None
+
+        def vwap_exit(upto: datetime) -> bool:
+            """VWT only: a completed 5-min bar after the entry that closed through VWAP, ending <= upto."""
+            if t.setup != "VWT" or t.state != "OPEN" or b is None:
+                return False
+            entered = datetime.fromisoformat(t.entry_time)
+            checked = datetime.fromisoformat(t.vwap_checked_to) if t.vwap_checked_to else entered
+            for i in range(len(b.ts)):
+                end = b.ts[i] + FIVE
+                if end <= entered or end <= checked or end > upto or end > now:
+                    continue
+                t.vwap_checked_to = end.isoformat()
+                if d * (b.c[i] - b.vwap[i]) < 0:
+                    self._close(t, b.c[i], b.ts[i], "EXIT_VWAP", events)
+                    return True
+            return False
+
         for ts, o, h, l, c, _ in rows:
+            if vwap_exit(ts):                       # a 5-min close through VWAP before this bar
+                return events
             t.seen_to = (ts + width).isoformat()
+            last_close = c
             fill_bar = False
             if t.state == "ARMED":
                 if ts >= until:
@@ -401,15 +473,18 @@ class SetupEngine:
             if ts + width >= square:
                 self._close(t, c, ts, "SQUARE_OFF", events)
                 return events
-        if t.state == "OPEN" and t.setup == "VWT" and b is not None:
-            k = b.done(now)
-            entered = datetime.fromisoformat(t.entry_time)
-            for i in range(k):
-                if b.ts[i] + FIVE <= entered or b.ts[i] + FIVE > now:
-                    continue
-                if d * (b.c[i] - b.vwap[i]) < 0:
-                    self._close(t, b.c[i], b.ts[i], "EXIT_VWAP", events)
-                    return events
+        if vwap_exit(now):
+            return events
+        if t.state == "OPEN" and now >= square + width:
+            # no candle reached 15:15 (halt / feed gap): square off at the last known price
+            price = last_close
+            if price is None and b is not None and b.done(now):
+                price = b.c[b.done(now) - 1]
+            if price is None and fine:
+                price = fine[-1][4]
+            if price is not None:
+                self._close(t, price, now - width, "SQUARE_OFF", events)
+                return events
         if t.state == "ARMED" and now >= until:
             t.state = "EXPIRED"
             events.append(SetupEvent("EXPIRED", now.isoformat(), t.to_dict()))
@@ -530,10 +605,13 @@ class SetupJournal:
     def path(self, day: str) -> Path:
         return self.root / f"{day}.jsonl"
 
-    def write(self, ev: SetupEvent) -> None:
+    def write(self, ev: SetupEvent, logged_at: datetime | None = None) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        row = {"kind": ev.kind, "at": ev.at, "trade": ev.trade}
+        if logged_at is not None:
+            row["logged_at"] = logged_at.isoformat()        # wall clock: when you were told
         with self.path(ev.at[:10]).open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"kind": ev.kind, "at": ev.at, "trade": ev.trade}, separators=(",", ":")) + "\n")
+            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
         if ev.trade["state"] in ("CLOSED", "EXPIRED"):
             p = self.root / "trades.csv"
             new = not p.exists()
@@ -612,17 +690,43 @@ class LiveSetups:
     """Runs the setup engine on the live 1-minute feed once a minute."""
 
     def __init__(self, engine: SetupEngine, base: dict[str, Baseline], stats: dict, journal: SetupJournal,
-                 day: date):
-        self.engine, self.base, self.stats, self.journal, self.day = engine, base, stats, journal, day
+                 day: date, clock=None):
+        self.engine, self.base, self.stats, self.journal, self.day = engine, dict(base), stats, journal, day
+        self.clock = clock or (lambda: datetime.now(IST))
+        self.prev_close_fixed = False
+        self.warned_rvol = False
         done = journal.trades(day.isoformat())
         if done:
             engine.restore(day, done)
+
+    def _use_feed_previous_close(self, stocks: dict) -> None:
+        """The feed's previous close is authoritative (the history may end a day early)."""
+        from dataclasses import replace as _replace
+        for sym, s in stocks.items():
+            pc = getattr(s, "previous_close", None)
+            if sym in self.base and pc:
+                self.base[sym] = _replace(self.base[sym], prev_close=pc)
+        self.prev_close_fixed = True
+
+    def rvol_warning(self) -> str | None:
+        """Yahoo and PSYGRID may count opening volume differently; on a normal day the
+        median stock's RVOL is near 1. Far from 1 means the two volume scales disagree."""
+        m = self.engine.diag.get("orb_median_rvol")
+        if m is None or self.warned_rvol:
+            return None
+        self.warned_rvol = True
+        if 0.4 <= m <= 2.5:
+            return None
+        return (f"VOLUME CHECK: median stock RVOL at 09:20 is {m:.2f}x (normal ~1x). Yahoo history and the "
+                f"live feed may count volume differently -- treat today's ORB list with care.")
 
     def muted(self, setup: str) -> bool:
         return (self.stats.get(setup) or {}).get("status") == "MUTED"
 
     def on_scan(self, stocks: dict, cutoff: datetime) -> list[SetupEvent]:
         """`stocks`: symbol -> 1-minute Series (selector_data.Series) of today."""
+        if not self.prev_close_fixed:
+            self._use_feed_previous_close(stocks)
         one, bars = {}, {}
         for sym, s in stocks.items():
             rows = [(s.ts[i], s.o[i], s.h[i], s.l[i], s.c[i], s.v[i]) for i in range(len(s)) if s.ts[i] < cutoff]
@@ -634,8 +738,9 @@ class LiveSetups:
                 bars[sym] = build_day(sym, five, self.engine.cfg.atr_bars)
         fine = {t.symbol: one.get(t.symbol, []) for t in self.engine.trades if t.live}
         events = self.engine.step(self.day, bars, self.base, cutoff, fine)
+        stamp = self.clock()
         for ev in events:
-            self.journal.write(ev)
+            self.journal.write(ev, stamp)
         return events
 
     def summary(self) -> str:

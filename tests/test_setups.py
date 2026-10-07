@@ -352,3 +352,161 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndToEndAuditTests(unittest.TestCase):
+    """Run the live scan with setups on a simulated morning, then --audit the saved day:
+    the replay must find exactly the setups the live run armed, at the same levels."""
+
+    def test_live_run_and_audit_agree(self):
+        from tests.test_945_scan import FakeFeed, TEST_CFG
+        from intelligence.selector_synthetic import make_index_payload
+        spec = importlib.util.spec_from_file_location("psygrid_945_e2e", ROOT / "945.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        day = date(2026, 10, 1)
+        payload = make_payload(90, session=day, minutes=375, seed=5, planted={"STK0010": 0.06, "STK0020": -0.06})
+        feed = FakeFeed(payload, make_index_payload(day, 375))
+        feed.t = at(day, 9, 18)
+        rnd = random.Random(2)
+        hist = {}
+        for sym, s in parse_payload(payload).stocks.items():
+            if len(s) >= 30:
+                rows = []
+                for d in trading_days(15, day - timedelta(days=1)):
+                    rows += flat_day(d, s.c[0], sum(s.v[20:25]) * 0.8, rnd)
+                hist[sym] = rows
+        mod.now, mod.sleep, mod.fetch = feed.now, feed.sleep, feed.fetch
+        mod.is_trading_day = lambda d: d.weekday() < 5
+        mod.beep = mod.alert_beep = lambda: None
+        mod.scan_config = lambda args: replace(TEST_CFG, stop_scanning=time(11, 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            save_history(Path(tmp) / "history" / "yahoo_5m.json.gz", hist, {})
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(mod.main(["--data-dir", tmp]), 0)
+            live_out = buf.getvalue()
+            self.assertIn("ARMED", live_out)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = mod.main(["--data-dir", tmp, "--audit", "--date", day.isoformat()])
+            out = buf.getvalue()
+            self.assertEqual(code, 0, out)
+            self.assertIn("identical: all", out, out)
+            self.assertNotIn("MISSED LIVE", out)
+            self.assertIn("after the crossing candle closed", out)
+            self.assertIn("NEAR MISSES", out)
+            self.assertIn("BIGGEST MOVES", out)
+            self.assertTrue((Path(tmp) / "audit" / f"{day.isoformat()}.txt").exists())
+            out.encode("ascii")
+
+    def test_audit_flags_a_setup_the_live_run_missed(self):
+        """Delete one ARMED setup from the live journal: the audit must name it."""
+        from intelligence.history import HistoryIndex as HI
+        from intelligence.setup_audit import audit, replay_day
+        idx = HI(random_history(40, 16))
+        day = idx.days()[-1]
+        rnd = random.Random(1)
+        base = idx.baselines(day)
+        from intelligence.selector_data import RawSession, Series
+        stocks = {}
+        for s in list(idx.daily_bars)[:40]:
+            p = base[s].prev_close
+            rows = []
+            for i in range(375):
+                o = p
+                c = o * (1 + (0.001 if s == "S003" else 0) + rnd.gauss(0, 0.0008))
+                rows.append((at(day, 9, 15) + timedelta(minutes=i), o, max(o, c) * 1.0002, min(o, c) * 0.9998, c,
+                             10_000 * (12.0 if (s == "S003" and i < 5) else 1.0)))
+                p = c
+            stocks[s] = Series(s, *zip(*rows))
+        raw = RawSession(day, stocks, {}, None, {}, "test")
+        eng, _, _ = replay_day(raw, idx, SetupConfig(), COST)
+        self.assertTrue(any(t.setup == "ORB" and t.symbol == "S003" for t in eng.trades))
+        with tempfile.TemporaryDirectory() as tmp:
+            j = Path(tmp) / "j.jsonl"
+            for t in eng.trades:
+                if t.symbol != "S003":
+                    j.open("a").write(json.dumps({"kind": "ARMED", "at": t.armed_at, "trade": t.to_dict()}) + "\n")
+            text = audit(raw, idx, SetupConfig(), COST, j)
+        self.assertIn("MISSED LIVE", text)
+        self.assertIn("S003", text.split("MISSED LIVE")[1].splitlines()[0])
+
+
+class ReviewFixTests(unittest.TestCase):
+    """One test per bug found in the correctness review."""
+
+    def setUp(self):
+        self.idx = HistoryIndex(random_history(30, 16))
+        self.day = self.idx.days()[-1]
+        self.base = self.idx.baselines(self.day)
+        self.cfg = replace(SetupConfig(), regime_long=1.1, regime_short=-0.1)
+
+    def vwt_open(self, eng, entry_ts):
+        eng.reset(self.day)
+        eng._arm("VWT", "S001", 1, 100.0, 98.0, entry_ts, entry_ts + timedelta(minutes=10), [])
+        t = eng.trades[-1]
+        return t
+
+    def test_vwap_exit_is_taken_in_time_order_before_a_later_stop(self):
+        """A 5-min close below VWAP at 10:10 must exit there, not at a stop hit at 10:12."""
+        eng = SetupEngine(self.cfg, COST)
+        t0 = at(self.day, 10, 0)
+        t = self.vwt_open(eng, t0)
+        five = [(at(self.day, 9, 15) + timedelta(minutes=5 * k), 100, 100.2, 99.9, 100.1, 1000) for k in range(9)]
+        five += [(t0, 99.95, 100.4, 99.9, 100.3, 1000), (t0 + timedelta(minutes=5), 100.3, 100.35, 99.0, 99.2, 50_000)]
+        b = build_day("S001", five)
+        self.assertLess(b.c[-1], b.vwap[-1])                     # the 10:05 bar closes below VWAP
+        fine = [(t0 + timedelta(minutes=i), 100, 100.3, 99.95, 100.1, 1) for i in range(10)]
+        fine += [(t0 + timedelta(minutes=10), 99.2, 99.3, 97.5, 97.6, 1)]   # stop hit at 10:10
+        events = eng.step(self.day, {"S001": b}, self.base, t0 + timedelta(minutes=11), {"S001": fine})
+        self.assertEqual([e.kind for e in events], ["TRIGGERED", "EXIT_VWAP"])
+        self.assertEqual(t.exit, 99.2)
+
+    def test_open_trade_is_squared_off_even_without_a_1515_candle(self):
+        eng = SetupEngine(self.cfg, COST)
+        eng.reset(self.day)
+        t1 = at(self.day, 14, 50)
+        eng._arm("FHM", "S002", 1, 100.0, 99.0, t1, t1 + timedelta(minutes=15), [])
+        fine = [(t1, 99.9, 100.2, 99.8, 100.1, 1), (t1 + timedelta(minutes=1), 100.1, 100.6, 100.0, 100.5, 1)]
+        eng.step(self.day, {}, self.base, t1 + timedelta(minutes=2), {"S002": fine})       # filled, halted after
+        events = eng.step(self.day, {}, self.base, at(self.day, 15, 17), {"S002": fine})
+        self.assertEqual([e.kind for e in events], ["SQUARE_OFF"])
+        self.assertEqual(eng.trades[0].exit, 100.5)
+
+    def test_orb_takes_the_top_20_by_rvol_before_the_body_filter(self):
+        """Paper order: a doji in the top 20 is skipped, it does NOT pull in stock #21."""
+        cfg = replace(self.cfg, orb_top=1)
+        rnd = random.Random(3)
+        bars = {}
+        for s in list(self.idx.daily_bars)[:3]:
+            rows = flat_day(self.day, self.base[s].prev_close, 50_000, rnd)
+            o = rows[0][1]
+            if s == "S000":    # highest RVOL but a doji
+                rows[0] = (rows[0][0], o, o * 1.005, o * 0.995, o * 1.0001, 50_000 * 9)
+            if s == "S001":    # second-highest RVOL, clean candle
+                rows[0] = (rows[0][0], o, o * 1.006, o * 0.999, o * 1.005, 50_000 * 5)
+            bars[s] = build_day(s, rows)
+        eng = SetupEngine(cfg, COST)
+        eng.step(self.day, bars, self.base, at(self.day, 9, 20))
+        self.assertEqual([t.symbol for t in eng.trades if t.setup == "ORB"], [])
+        miss = {n["symbol"]: n["failed"] for n in eng.near if n["setup"] == "ORB"}
+        self.assertEqual(miss.get("S000"), "candle body")
+        self.assertEqual(miss.get("S001"), "top-RVOL rank")
+
+    def test_live_uses_the_feeds_previous_close_and_warns_on_volume_scale(self):
+        from intelligence.selector_data import Series
+        rnd = random.Random(5)
+        stale = {s: replace(b, prev_close=1.0) for s, b in self.base.items()}
+        with tempfile.TemporaryDirectory() as tmp:
+            live = LiveSetups(SetupEngine(self.cfg, COST), stale, {}, SetupJournal(tmp), self.day)
+            stocks = {}
+            for s in list(self.idx.daily_bars)[:20]:
+                p = self.base[s].prev_close
+                rows = [(at(self.day, 9, 15) + timedelta(minutes=i), p, p * 1.001, p * 0.999, p, 50_000.0) for i in range(6)]
+                stocks[s] = Series(s, *zip(*rows), previous_close=p)
+            live.on_scan(stocks, at(self.day, 9, 20))
+            self.assertEqual(live.base["S000"].prev_close, self.base["S000"].prev_close)
+            self.assertGreater(live.engine.diag["orb_median_rvol"], 2.5)     # 5 x 50k vs ~50k history
+            self.assertIn("VOLUME CHECK", live.rvol_warning())
+            self.assertIsNone(live.rvol_warning())                            # said once

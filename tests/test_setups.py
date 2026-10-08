@@ -208,6 +208,21 @@ class EngineTests(unittest.TestCase):
         self.assertEqual([(e.kind, e.trade["exit_reason"]) for e in events], [("EXPIRED", "MISSED")])
         self.assertIsNone(eng.trades[0].entry)
 
+    def test_optional_r_target_books_the_profit(self):
+        from intelligence.setups import EMPTY_BASE
+        for target_r, expect in ((None, None), (2.0, ("TARGET", 98.0))):
+            eng = SetupEngine(replace(self.cfg, target_r=target_r), COST)
+            eng.reset(self.day)
+            now = at(self.day, 10, 0)
+            eng._ctx = ({}, {"S001": replace(EMPTY_BASE, prev_close=101.0)}, {},
+                        {"S001": [(now - timedelta(minutes=1), 100.5, 100.6, 100.4, 100.5, 1)]})
+            eng._arm("ORB", "S001", -1, 100.0, 101.0, now, now + timedelta(minutes=30), [])
+            fine = {"S001": [(now, 100.1, 100.2, 99.9, 100.0, 1),                 # sell stop 100 fills
+                             (now + timedelta(minutes=1), 99.5, 99.6, 97.5, 98.2, 1)]}   # through 98 = 2R
+            events = eng.step(self.day, {}, {}, now + timedelta(minutes=3), fine)
+            closed = [(e.kind, e.trade["exit"]) for e in events if e.kind not in ("ARMED", "TRIGGERED")]
+            self.assertEqual(closed, [expect] if expect else [])
+
     def test_vwap_trend_pullback_arms_and_exits_on_vwap_close(self):
         base = self.index.baselines(self.day)
         p = base["S007"].prev_close

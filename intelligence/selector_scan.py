@@ -92,6 +92,7 @@ class ScanConfig:
     gst_pct: float = 18.0
     slippage_pct_per_side: float = 0.03
     risk_rupees: float | None = None           # print a share quantity for this risk
+    max_position: float | None = None          # ... never more than this many rupees per position
 
 
 def round_trip_cost_pct(cfg: ScanConfig) -> float:
@@ -354,6 +355,8 @@ class Scanner:
         if net_rr < cfg.min_net_rr:
             return None, f"costs eat the edge (net reward/risk {net_rr:.2f})"
         qty = int(cfg.risk_rupees // (risk + cost)) if cfg.risk_rupees else None
+        if qty is not None and cfg.max_position:
+            qty = min(qty, int(cfg.max_position // trigger))
         m = table.market
         number = len(self.trades) + 1
         return Trade(
@@ -532,7 +535,10 @@ def render_signal(t: dict) -> str:
         f"TIME STOP    : exit at market {t.get('hold_minutes', 60)} min after the fill if neither is hit (15:15 at the latest)",
     ]
     if t.get("quantity") is not None:
-        lines.append(f"QUANTITY     : {t['quantity']} shares for the chosen rupee risk (incl. costs)")
+        if t["quantity"] <= 0:
+            lines.append("QUANTITY     : 0 -- SKIP this trade (one share risks more than your rupee risk)")
+        else:
+            lines.append(f"QUANTITY     : {t['quantity']} shares for the chosen rupee risk (incl. costs)")
     m = t.get("market") or {}
     br = m.get("breadth")
     mr = m.get("market_return_pct")

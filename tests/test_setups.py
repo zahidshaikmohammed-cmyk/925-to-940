@@ -223,6 +223,15 @@ class EngineTests(unittest.TestCase):
             closed = [(e.kind, e.trade["exit"]) for e in events if e.kind not in ("ARMED", "TRIGGERED")]
             self.assertEqual(closed, [expect] if expect else [])
 
+    def test_position_size_for_a_small_account(self):
+        from intelligence.setups import position_size, quantity_line
+        self.assertEqual(position_size(250.30, 2.06, 0.0, 25), 12)                  # BUILDPRO
+        self.assertEqual(position_size(80.47, 0.42, 0.0, 25, 5000), 59)            # INA
+        self.assertEqual(position_size(80.47, 0.05, 0.0, 25, 5000), 62)            # capped by Rs 5,000
+        self.assertEqual(position_size(1565.10, 90.90, 0.1424, 25, 5000), 0)       # PAYTM: skip
+        self.assertIn("SKIP", quantity_line(0, 1565.1, 90.9, 25))
+        self.assertIn("12 shares", quantity_line(12, 250.3, 2.06, 25))
+
     def test_vwap_trend_pullback_arms_and_exits_on_vwap_close(self):
         base = self.index.baselines(self.day)
         p = base["S007"].prev_close

@@ -6,6 +6,8 @@
 > **No edge has been shown on real data yet**, and live orders stay blocked by `validation_gate.py`
 > until walk-forward and paper gates pass. Commands: `python -m sensex_expiry --self-test`,
 > `--null-test N`, `--backtest DIR`, `--walk-forward DIR`, `--ablation DIR`, `--gate REPORT`.
+> **Real-data baseline: see [REAL_DATA_VALIDATION.md](REAL_DATA_VALIDATION.md).** Not produced yet, because Dhan is unreachable
+> from the research VM. Run `python -m sensex_expiry.realdata fetch|build`, then `python -m sensex_expiry --baseline DIR`.
 
 # 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 

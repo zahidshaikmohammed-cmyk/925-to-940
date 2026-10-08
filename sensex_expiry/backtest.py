@@ -54,6 +54,11 @@ class Trade:
     exit_reason: str
     hold_min: float
     tags: dict
+    mae_r: float = 0.0
+    costs: float = 0.0          # statutory + brokerage, rupees
+    slippage: float = 0.0       # modelled spread + slippage paid, rupees
+    regime: str = ""
+    signal_ts: datetime | None = None
 
 
 @dataclass
@@ -101,6 +106,8 @@ def run_day(cfg: EngineConfig, day: DayData, spread_pct: float = 0.005, capital:
                                     plan["qty"], bar.start, fill, plan["stop_frac"], cand.invalidation,
                                     plan["atr"] or 1.0, cand.trigger_price)
                 eng.on_entry(cand.key)
+                pos.log.append({"event": "META", "regime": plan["regime"], "signal_ts": plan["signal_ts"],
+                                "entry_half_spread": half, "spread_pct": spread_pct})
             else:
                 reasons["ENTRY_NOT_FILLED"] = reasons.get("ENTRY_NOT_FILLED", 0) + 1
         if pos is not None and pos.open:
@@ -124,7 +131,8 @@ def run_day(cfg: EngineConfig, day: DayData, spread_pct: float = 0.005, capital:
             if dec.action is Action.BUY:
                 p = dec.payload
                 pending_entry = (dec, {"strike": p["strike"], "right": p["right"], "qty": p["qty"],
-                                       "stop_frac": p["stop_frac"], "atr": p.get("atr")})
+                                       "stop_frac": p["stop_frac"], "atr": p.get("atr"),
+                                       "regime": p.get("regime", ""), "signal_ts": bar.start})
             else:
                 for r in dec.reasons:
                     reasons[r.value] = reasons.get(r.value, 0) + 1
@@ -139,9 +147,16 @@ def run_day(cfg: EngineConfig, day: DayData, spread_pct: float = 0.005, capital:
 
 def _trade(cfg: EngineConfig, day: DayData, pos: Position) -> Trade:
     r = realized(cfg, pos)
+    meta = next((e for e in pos.log if e.get("event") == "META"), {})
+    slip = cfg.risk.slippage_ticks * cfg.risk.tick_size
+    sp = meta.get("spread_pct", 0.0)
+    half_in = meta.get("entry_half_spread", 0.0)
+    half_out = max(cfg.risk.tick_size, sp * (pos.exit_price or 0) / 2) if sp else 0.0
     return Trade(day.day, pos.setup, pos.direction.value, pos.entry_ts, pos.exit_ts, pos.entry_price, pos.exit_price,
                  pos.qty, round(pos.one_r, 2), r["r_gross"], r["r_net"], r["mfe_r"], pos.exit_reason.value,
-                 (pos.exit_ts - pos.entry_ts).total_seconds() / 60, dict(day.tags))
+                 (pos.exit_ts - pos.entry_ts).total_seconds() / 60, dict(day.tags),
+                 mae_r=r["mae_r"], costs=r["costs"], slippage=round((2 * slip + half_in + half_out) * pos.qty, 2),
+                 regime=meta.get("regime", ""), signal_ts=meta.get("signal_ts"))
 
 
 def run(cfg: EngineConfig, days: list[DayData], spread_pct: float = 0.005) -> BacktestResult:

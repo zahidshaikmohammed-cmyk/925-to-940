@@ -107,4 +107,4 @@ def load_day(path: Path) -> DayData:
 
 
 def load_folder(folder: Path) -> list[DayData]:
-    return [load_day(p) for p in sorted(Path(folder).glob("*.json"))]
+    return [load_day(p) for p in sorted(Path(folder).glob("*.json")) if not p.name.startswith("_")]

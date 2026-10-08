@@ -46,17 +46,20 @@ class StrategyEngine:
         if self.risk_state is None:
             self.risk_state = DailyRiskState(day=str(self.day))
 
-    def evaluate_entry(self, candles: list[Candle], now: datetime, quality: QualityReport, quote: QuoteFn,
-                       capital: float | None = None) -> Decision:
+    def evaluate_signal(self, candles: list[Candle], now: datetime, quality: QualityReport,
+                        require_expiry: bool = True) -> tuple[Decision | None, dict]:
+        """Every gate that does not need an option quote. Returns (NO_TRADE decision, {}) when
+        blocked, else (None, context). Test A calls it with require_expiry=False to measure
+        the underlying signal on every trading day; the live and option paths never do."""
         cfg = self.cfg
         bar = candles[-1] if candles else None
         bar_close = bar.start + timedelta(minutes=1) if bar else now
 
-        def no(*reasons: Reason, cand: SetupCandidate | None = None, extra: dict | None = None) -> Decision:
+        def no(*reasons: Reason, cand: SetupCandidate | None = None, extra: dict | None = None):
             return Decision(Action.NO_TRADE, now, list(reasons), cand,
-                            self._payload(Action.NO_TRADE, now, bar, cand, list(reasons), quality, extra or {}))
+                            self._payload(Action.NO_TRADE, now, bar, cand, list(reasons), quality, extra or {})), {}
 
-        if not self.is_expiry:
+        if require_expiry and not self.is_expiry:
             return no(Reason.NOT_EXPIRY_DAY)
         if quality.quality.value != "GOOD":
             return no(*(quality.reasons or [Reason.DATA_BAD]))
@@ -81,14 +84,27 @@ class StrategyEngine:
         aligned = allows(cand.setup, s, regime)
         if cfg.use_regime_filter and not aligned:
             return no(Reason.REGIME_CONFLICT, cand=cand, extra=extra)
-        dist = cand.stop_distance
-        room_r = None if cand.room_level is None else s * (cand.room_level - cand.trigger_price) / dist
+        room_r = None if cand.room_level is None else s * (cand.room_level - cand.trigger_price) / cand.stop_distance
         if cfg.use_room_filter and room_r is not None and room_r < cfg.setups.min_room_r:
             return no(Reason.ROOM_TOO_SMALL, cand=cand, extra=extra | {"room_r": room_r})
 
         blocked = pre_trade_checks(cfg, self.risk_state, now, cand.key)
         if blocked:
             return no(*blocked, cand=cand, extra=extra)
+        return None, {"cand": cand, "extra": extra, "aligned": aligned, "room_r": room_r, "t": t, "bar": bar}
+
+    def evaluate_entry(self, candles: list[Candle], now: datetime, quality: QualityReport, quote: QuoteFn,
+                       capital: float | None = None) -> Decision:
+        cfg = self.cfg
+        blocked_decision, ctx = self.evaluate_signal(candles, now, quality)
+        if blocked_decision is not None:
+            return blocked_decision
+        cand, extra, aligned, room_r, t, bar = (ctx[k] for k in ("cand", "extra", "aligned", "room_r", "t", "bar"))
+        dist = cand.stop_distance
+
+        def no(*reasons: Reason, cand: SetupCandidate | None = None, extra: dict | None = None) -> Decision:
+            return Decision(Action.NO_TRADE, now, list(reasons), cand,
+                            self._payload(Action.NO_TRADE, now, bar, cand, list(reasons), quality, extra or {}))
 
         strike, right = choose_strike(cand.trigger_price, cand.direction, cfg.options)
         q = quote(strike, right)

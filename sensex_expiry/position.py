@@ -41,6 +41,7 @@ class Position:
     bars_held: int = 0
     best_close: float = 0.0      # best underlying close in trade direction
     peak_premium: float = 0.0
+    trough_premium: float = 0.0  # for MAE reporting only; never read by an exit rule
     pending_exit: Reason | None = None
     exit_ts: datetime | None = None
     exit_price: float | None = None
@@ -67,7 +68,8 @@ def open_position(cfg: EngineConfig, key: str, setup: str, direction: Direction,
     slip = cfg.risk.slippage_ticks * cfg.risk.tick_size
     one_r = (fill_price - (stop - slip)) * qty + round_trip(fill_price, stop - slip, qty, cfg.costs).total
     return Position(key, setup, direction, strike, right, qty, fill_ts, fill_price, stop, invalidation, one_r,
-                    atr_value, initial_stop=stop, best_close=underlying_close, peak_premium=fill_price)
+                    atr_value, initial_stop=stop, best_close=underlying_close, peak_premium=fill_price,
+                    trough_premium=fill_price)
 
 
 def manage(cfg: EngineConfig, pos: Position, und: Candle, opt: Candle | None, atr_value: float | None) -> None:
@@ -89,6 +91,7 @@ def manage(cfg: EngineConfig, pos: Position, und: Candle, opt: Candle | None, at
         return
 
     pos.bars_held += 1
+    pos.trough_premium = min(pos.trough_premium, opt.low)
     # 1 premium stop
     if opt.low <= pos.stop:
         fill = min(pos.stop, opt.open) - slip
@@ -148,4 +151,5 @@ def realized(cfg: EngineConfig, pos: Position) -> dict:
     net = gross - costs.total
     return {"gross": round(gross, 2), "costs": round(costs.total, 2), "net": round(net, 2),
             "r_gross": round(gross / pos.one_r, 4), "r_net": round(net / pos.one_r, 4),
-            "mfe_r": round(pos.r_at(pos.peak_premium), 4)}
+            "mfe_r": round(pos.r_at(pos.peak_premium), 4),
+            "mae_r": round(pos.r_at(min(pos.trough_premium, pos.exit_price)), 4)}

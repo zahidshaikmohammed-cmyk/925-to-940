@@ -6,6 +6,8 @@
   python -m sensex_expiry --walk-forward DATA_DIR --train 40 --validate 15 --test 15
   python -m sensex_expiry --ablation DATA_DIR
   python -m sensex_expiry --gate REPORT.json --stage TINY_LIVE
+  python -m sensex_expiry --baseline DATA_DIR --out reports/baseline [--workers 4] [--n-null 200]
+  python -m sensex_expiry --validate-synthetic 40 --out reports/synthetic_pipeline_check
 
 DATA_DIR holds one JSON file per day in history.py's format. There is no live-order
 command here on purpose: live trading needs a passing gate and the separate runner.
@@ -134,6 +136,11 @@ def main(argv=None) -> int:
     ap.add_argument("--gate", type=Path)
     ap.add_argument("--stage", default="TINY_LIVE")
     ap.add_argument("--report", type=Path)
+    ap.add_argument("--baseline", type=Path, help="baseline validation on a real dataset (realdata.py build)")
+    ap.add_argument("--validate-synthetic", type=int, help="run the validation pipeline on N synthetic days")
+    ap.add_argument("--out", type=Path, default=Path("reports/baseline"))
+    ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--n-null", type=int, default=200)
     a = ap.parse_args(argv)
     cfg = EngineConfig()
     if a.self_test:
@@ -142,6 +149,32 @@ def main(argv=None) -> int:
         g = live_allowed(a.gate, cfg.config_hash(), a.stage)
         print(json.dumps({"allowed": g.allowed, "stage": g.stage, "failures": g.failures}, indent=2))
         return 0 if g.allowed else 3
+    if a.baseline or a.validate_synthetic:
+        from .validation import ValidationRun
+        if a.baseline:
+            days, label = load_folder(a.baseline), "REAL DHAN DATA"
+            if not days:
+                print(f"no day files in {a.baseline}", file=sys.stderr)
+                return 2
+        else:
+            from .synthetic import make_days, make_day
+            from datetime import timedelta
+            exp = make_days(a.validate_synthetic, seed=77)
+            extra = []
+            for i, d in enumerate(exp):                     # add non-expiry days for Test A
+                for k in (1, 2):
+                    nd = make_day(d.day - timedelta(days=k), seed=9000 + 10 * i + k, strikes_each_side=0, is_expiry=False)
+                    extra.append(nd)
+            days = sorted(exp + extra, key=lambda d: d.day)
+            from .models import PriorDay
+            for prev, cur in zip(days, days[1:]):           # chain each prior day to the real previous session
+                u = prev.underlying
+                cur.prior = PriorDay(prev.day, max(x.high for x in u), min(x.low for x in u), u[-1].close)
+            label = "SYNTHETIC RANDOM WALK - PIPELINE CHECK ONLY, NOT EVIDENCE"
+        r = ValidationRun(cfg, days, a.out, n_null=a.n_null, workers=a.workers, label=label).run()
+        print(json.dumps({"verdict": r["verdict"], "lookahead_audit_pass": r["lookahead_audit"].get("ALL_PASS"),
+                          "report": str(a.out / "VALIDATION_REPORT.md")}, indent=2))
+        return 0
     if a.null_test:
         out = cmd_null(cfg, a.null_test)
     elif a.backtest:

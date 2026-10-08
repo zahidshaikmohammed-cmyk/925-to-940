@@ -82,6 +82,11 @@ class SetupConfig:
     vwt_top: int = 5                         # best 5 per bar by relative strength
     vwt_max_day: int = 20                    # at most 20 VWT setups armed per day
     atr_bars: int = 14
+    # Safety gates for every setup (2026-10-08: a late start armed PAYTM SHORT after the break had
+    # already happened, 9.6% down on the day, with a 5.8% stop).
+    max_day_move_pct: float = 7.0            # never trade a stock already 7% from its previous close
+    max_risk_pct: float = 3.0                # never arm a setup whose stop is more than 3% away
+    max_fill_slip_pct: float = 0.5           # a bar opening further than 0.5% past the trigger = missed
 
 
 # --------------------------------------------------------------------------- bars
@@ -144,6 +149,7 @@ class SetupTrade:
     net_r: float | None = None
     net_pct: float | None = None
     seen_to: str = ""                  # bars before this time are processed
+    prev_close: float | None = None    # for the day-move gate at the trigger
     vwap_checked_to: str = ""          # VWT: 5-min bars ending at or before this are checked
 
     @property
@@ -199,6 +205,7 @@ class SetupEngine:
         cfg = self.cfg
         base = {s: base.get(s) or EMPTY_BASE for s in bars}
         ks = {s: b.done(now) for s, b in bars.items() if b.ts}
+        self._ctx = (bars, base, ks, fine or {})
         live = [s for s, k in ks.items() if k > 0 and self._turnover(bars[s], base[s], k) >= cfg.min_turnover_5m]
         if not live:
             return events
@@ -235,6 +242,14 @@ class SetupEngine:
                               "direction": "LONG" if d > 0 else "SHORT",
                               "failed": failed[0][0], "detail": failed[0][1]})
 
+    def _last_price(self, sym: str) -> float | None:
+        bars, _base, ks, fine = getattr(self, "_ctx", ({}, {}, {}, {}))
+        rows = fine.get(sym) or []
+        if rows:
+            return rows[-1][4]
+        b, k = bars.get(sym), ks.get(sym, 0)
+        return b.c[k - 1] if b is not None and k else None
+
     def _arm(self, setup, sym, d, trigger, stop, now, until, facts) -> SetupEvent | None:
         risk = abs(trigger - stop)
         if risk <= 0 or d * (trigger - stop) <= 0:
@@ -242,13 +257,23 @@ class SetupEngine:
         cost_r = self.cost_pct / 100 * trigger / risk
         if cost_r > self.cfg.max_cost_r:
             return None
+        cfg = self.cfg
+        if risk / trigger * 100 > cfg.max_risk_pct:
+            return None                                   # stop too far away
+        _bars, base, _ks, _fine = getattr(self, "_ctx", ({}, {}, {}, {}))
+        pc = (base.get(sym) or EMPTY_BASE).prev_close
+        if pc and d * (trigger / pc - 1) * 100 >= cfg.max_day_move_pct:
+            return None                                   # already moved 7% that way
+        last = self._last_price(sym)
+        if last is not None and d * (last - trigger) >= 0:
+            return None                                   # the break already happened before arming
         self.done.add((setup, sym))
         t = SetupTrade(id=f"{now.date().isoformat()}-{setup}-{sym}", day=now.date().isoformat(), setup=setup,
                        symbol=sym, direction="LONG" if d > 0 else "SHORT", side=d, armed_at=now.isoformat(),
                        trigger=round(trigger, 2), stop=round(stop, 2), valid_until=until.isoformat(),
                        cost_pct=round(self.cost_pct, 4),
                        facts=facts + [f"costs {cost_r:.2f}R of a {risk / trigger * 100:.2f}% risk"],
-                       seen_to=now.isoformat())
+                       seen_to=now.isoformat(), prev_close=pc)
         self.trades.append(t)
         return SetupEvent("ARMED", now.isoformat(), t.to_dict())
 
@@ -482,7 +507,15 @@ class SetupEngine:
                     break
                 if not ((d > 0 and h >= t.trigger) or (d < 0 and l <= t.trigger)):
                     continue
-                t.entry = round(max(t.trigger, o) if d > 0 else min(t.trigger, o), 2)
+                entry = max(t.trigger, o) if d > 0 else min(t.trigger, o)
+                cfg = self.cfg
+                moved = t.prev_close and d * (entry / t.prev_close - 1) * 100 >= cfg.max_day_move_pct
+                if abs(entry - t.trigger) / t.trigger * 100 > cfg.max_fill_slip_pct or moved:
+                    # Opened well past the trigger, or the stock is already 7% gone: a missed trade.
+                    t.state, t.exit_reason = "EXPIRED", "MISSED"
+                    events.append(SetupEvent("EXPIRED", ts.isoformat(), t.to_dict()))
+                    return events
+                t.entry = round(entry, 2)
                 t.entry_time, t.state, fill_bar = ts.isoformat(), "OPEN", True
                 events.append(SetupEvent("TRIGGERED", ts.isoformat(), t.to_dict()))
             if (d > 0 and l <= t.stop) or (d < 0 and h >= t.stop):
@@ -698,6 +731,8 @@ def render_setup_update(ev: SetupEvent, stats: dict) -> str:
     if ev.kind == "TRIGGERED":
         return f"{head} TRIGGERED at Rs {t['entry']:.2f} (muted setup: logged, no alert)"
     if ev.kind == "EXPIRED":
+        if t.get("exit_reason") == "MISSED":
+            return f"{head} skipped: price was already well past the trigger or 7% gone on the day (no alert)"
         return f"{head} expired untriggered"
     return (f"{head} {ev.kind} at Rs {t['exit']:.2f}: {t['gross_r']:+.2f}R gross, {t['net_r']:+.2f}R net "
             f"({t['net_pct']:+.2f}%)")
@@ -757,8 +792,8 @@ class LiveSetups:
             five = to_five_minute(rows, cutoff)
             if five:
                 bars[sym] = build_day(sym, five, self.engine.cfg.atr_bars)
-        fine = {t.symbol: one.get(t.symbol, []) for t in self.engine.trades if t.live}
-        events = self.engine.step(self.day, bars, self.base, cutoff, fine)
+        # Every stock's 1-minute bars: trade management and the arming check on the latest price.
+        events = self.engine.step(self.day, bars, self.base, cutoff, one)
         stamp = self.clock()
         for ev in events:
             self.journal.write(ev, stamp)

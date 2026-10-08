@@ -31,6 +31,7 @@ jobs:
           python opt.py --self-test
           python bbbbb_plus.py --self-test
           python 945.py --self-test
+          python -m sensex_expiry --self-test
       - name: 945 production-scale benchmark (989 stocks, integrated path)
         run: python 945.py --benchmark
       - name: Verify systemd units

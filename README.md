@@ -1,3 +1,12 @@
+# SENSEX Expiry — Zero→Hero Engine v1.0 (research build)
+
+> `sensex_expiry/` is a separate, fully mechanical engine for **SENSEX weekly-expiry-day option
+> buying** through the Dhan API. Read **[SENSEX_EXPIRY_SPEC.md](SENSEX_EXPIRY_SPEC.md)** first. It covers
+> the research, the Dhan capability audit, the architecture, and the locked constitution (§39).
+> **No edge has been shown on real data yet**, and live orders stay blocked by `validation_gate.py`
+> until walk-forward and paper gates pass. Commands: `python -m sensex_expiry --self-test`,
+> `--null-test N`, `--backtest DIR`, `--walk-forward DIR`, `--ablation DIR`, `--gate REPORT`.
+
 # 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 
 > **945 continuous scan:** `python 945.py` now rescans every stock once a minute from 09:30

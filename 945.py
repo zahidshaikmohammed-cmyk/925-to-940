@@ -228,7 +228,7 @@ def cmd_benchmark(args, cfg, weights) -> int:
 def scan_config(args) -> ScanConfig:
     from dataclasses import replace
     cfg = ScanConfig()
-    changes = {"allow_tier2": args.allow_tier2, "risk_rupees": args.risk_rupees}
+    changes = {"allow_tier2": args.allow_tier2, "risk_rupees": args.risk_rupees, "max_position": args.max_position}
     if args.tier1 is not None:
         changes["tier1_score"] = args.tier1
     if args.order_value is not None:
@@ -512,7 +512,7 @@ def cmd_scan(args, weights) -> int:
                         muted = setups.muted(ev.trade["setup"])
                         if ev.kind == "TRIGGERED" and not muted:
                             alert_beep()
-                            print(render_trigger(ev.trade, setups.stats, cfg.risk_rupees), flush=True)
+                            print(render_trigger(ev.trade, setups.stats, cfg.risk_rupees, cfg.max_position), flush=True)
                             continue
                         if ev.kind in ("STOP", "TARGET", "EXIT_VWAP", "SQUARE_OFF") and not muted:
                             beep()
@@ -637,6 +637,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-setups", action="store_true", help="scan: run without the research setups")
     p.add_argument("--no-yahoo", action="store_true", help="scan: never try to download Yahoo history")
     p.add_argument("--symbols", help="bootstrap: file with the symbols to download (one per line or JSON)")
+    p.add_argument("--max-position", type=float, default=None,
+                   help="with --risk-rupees: never more than this many rupees in one position (e.g. 5000)")
     p.add_argument("--target-r", type=float, default=None,
                    help="setups: book the profit at this many R (e.g. 2); the stop and VWAP/15:15 exits stay")
     p.add_argument("--orb-stop", default="range", choices=("range", "atr10"),

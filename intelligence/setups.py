@@ -706,7 +706,25 @@ def record_line(stats: dict, setup: str) -> str:
             f"{s['avg_net_r']:+.2f}R avg after costs")
 
 
-def render_trigger(t: dict, stats: dict, risk_rupees: float | None = None) -> str:
+def position_size(price: float, risk_per_share: float, cost_pct: float, risk_rupees: float,
+                  max_position: float | None = None) -> int:
+    """Shares for a rupee risk (stop loss plus costs), never more than ``max_position`` rupees."""
+    per_share = risk_per_share + cost_pct / 100 * price
+    qty = int(risk_rupees // per_share) if per_share > 0 else 0
+    if max_position:
+        qty = min(qty, int(max_position // price))
+    return max(qty, 0)
+
+
+def quantity_line(qty: int, price: float, risk_per_share: float, risk_rupees: float) -> str:
+    if qty <= 0:
+        return f"QUANTITY     : 0 -- SKIP this trade (one share risks more than Rs {risk_rupees:,.0f} or costs too much)"
+    return (f"QUANTITY     : {qty} shares = Rs {qty * price:,.0f} position, "
+            f"Rs {qty * risk_per_share:,.0f} at risk if stopped")
+
+
+def render_trigger(t: dict, stats: dict, risk_rupees: float | None = None,
+                   max_position: float | None = None) -> str:
     buy = t["side"] > 0
     risk = abs(t["entry"] - t["stop"])
     plan = {"ORB": "hold to 15:15 unless stopped (no fixed target: this setup earns from trend days)",
@@ -722,8 +740,8 @@ def render_trigger(t: dict, stats: dict, risk_rupees: float | None = None) -> st
     if t.get("target") is not None:
         lines.append(f"TARGET       : Rs {t['target']:.2f} (profit is booked there)")
     if risk_rupees:
-        lines.append(f"QUANTITY     : {int(risk_rupees // (risk + t['cost_pct'] / 100 * t['entry']))} shares "
-                     f"for Rs {risk_rupees:,.0f} risk incl. costs")
+        qty = position_size(t["entry"], risk, t["cost_pct"], risk_rupees, max_position)
+        lines.append(quantity_line(qty, t["entry"], risk, risk_rupees))
     lines.append("WHY THIS SETUP:")
     lines += [f"  - {x}" for x in t.get("facts", [])]
     lines.append(f"TRACK RECORD : {record_line(stats, t['setup'])}")

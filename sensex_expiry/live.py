@@ -6,7 +6,7 @@ Dhan live, Dhan market data with the paper broker, or a recorded replay in tests
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from .audit import AuditLog
 from .candles import CandleBuilder
@@ -50,6 +50,14 @@ class LiveRunner:
     _last_emergency: datetime | None = None
     feed_connected: bool = True
     last_index_tick: datetime | None = None
+    entries_paused: bool = False         # dashboard PAUSE: positions are still managed and exited
+    # observability for the dashboard (read-only copies, never read by trading logic)
+    last_decision: dict | None = None
+    last_buy_decision: dict | None = None
+    last_order_event: dict | None = None
+    closed_trades: list = field(default_factory=list)
+    reason_counts: dict = field(default_factory=dict)
+    last_quality: dict | None = None
 
     def __post_init__(self):
         self.session_open = at(self.day, self.cfg.session.market_open)
@@ -117,6 +125,14 @@ class LiveRunner:
     def _on_bar(self, bar: Candle, now: datetime) -> None:
         if self.kill.tripped:
             return
+        # Close every option candle up to this minute from the ticks already received. An option
+        # tick for minute M can arrive after the index tick that closed minute M; without this the
+        # position manager would see "no option bar" and force a data-failure exit. Ticks that
+        # arrive later for minute M are counted as late and never applied (no history rewrite).
+        boundary = bar.start + timedelta(minutes=1, seconds=self.cfg.session.candle_close_grace_s)
+        for b in self.opt_builders.values():
+            if b._cur is not None and b._cur.start <= bar.start:
+                b.on_clock(boundary)
         hist = self.builder.closed
         if self.pos is not None and self.sm.state is State.EXIT_PENDING:
             self._poll_exit(now)
@@ -146,13 +162,23 @@ class LiveRunner:
                    option_quote_ts=opt_ts, feed_connected=self.feed_connected)
         dec = self.engine.evaluate_entry(hist, now, q, self._quote, self.capital)
         self.audit.write("DECISION", now, dec.payload)
+        self.last_decision, self.last_quality = dec.payload, q.as_dict()
+        for r in dec.reasons:
+            self.reason_counts[r.value] = self.reason_counts.get(r.value, 0) + 1
         if dec.action is not Action.BUY:
+            return
+        self.last_buy_decision = dec.payload
+        if self.entries_paused:
+            self.audit.write("GUARD_BLOCK", now, {"reasons": [Reason.ENTRIES_PAUSED.value]})
+            self.reason_counts[Reason.ENTRIES_PAUSED.value] = self.reason_counts.get(Reason.ENTRIES_PAUSED.value, 0) + 1
             return
         reasons, req = self.guard.check(now=now, decision_payload=dec.payload, broker=self.broker,
                                         data_age_ms=q.data_age_ms, market_open=True, live_gate_ok=self.live_gate_ok,
                                         kill_switch_tripped=self.kill.tripped, engine_flat=self.sm.flat)
         if req is None:
             self.audit.write("GUARD_BLOCK", now, {"reasons": [r.value for r in reasons]})
+            for r in reasons:
+                self.reason_counts[r.value] = self.reason_counts.get(r.value, 0) + 1
             return
         for s in (State.DATA_VALID, State.REGIME_IDENTIFIED, State.SETUP_CONFIRMED, State.RISK_APPROVED, State.ORDER_PENDING):
             if self.sm.state is not s:
@@ -160,6 +186,8 @@ class LiveRunner:
         self.kill.note_order(now)
         st = self.broker.place(req)
         self.audit.write("ORDER", now, {"request": req.__dict__, "status": st.status.value, "order_id": st.order_id})
+        self.last_order_event = {"ts": now.isoformat(), "kind": "ENTRY", "side": "BUY", "order_id": st.order_id,
+                                 "status": st.status.value, "price": req.price, "qty": req.qty}
         if st.status is not OrderStatus.FILLED:
             self.sm.go(State.WAITING, now, f"entry {st.status.value}")
             return
@@ -219,6 +247,9 @@ class LiveRunner:
         self.audit.write("EXIT_ORDER", now, {"reason": self.exit_reason.value if self.exit_reason else None,
                                              "price": req.price, "attempt": self.exit_attempts,
                                              "status": st.status.value})
+        self.last_order_event = {"ts": now.isoformat(), "kind": "EXIT", "side": "SELL", "order_id": st.order_id,
+                                 "status": st.status.value, "price": req.price, "qty": req.qty,
+                                 "attempt": self.exit_attempts}
         if st.status is OrderStatus.FILLED:
             self._closed(now, float(st.avg_price), self.exit_reason or Reason.EXIT_DATA_FAILURE)
 
@@ -253,6 +284,10 @@ class LiveRunner:
         self.engine.risk_state.record_exit(res["r_net"], now)
         self.audit.write("TRADE_CLOSED", now, {"key": pos.key, "setup": pos.setup, "entry": pos.entry_price,
                                                "exit": price, "qty": pos.qty, "reason": reason.value, **res})
+        self.closed_trades.append({"setup": pos.setup, "direction": pos.direction.value, "strike": pos.strike,
+                                   "right": pos.right, "qty": pos.qty, "entry_ts": pos.entry_ts.isoformat(),
+                                   "exit_ts": now.isoformat(), "entry": pos.entry_price, "exit": price,
+                                   "reason": reason.value, "one_r": round(pos.one_r, 2), **res})
         self.pos, self.sl_order_id = None, None
         self.exit_order_id, self.exit_reason, self.exit_sent_at, self.exit_attempts = None, None, None, 0
         self.sm.go(State.COOLDOWN, now, reason.value)

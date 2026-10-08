@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the SENSEX expiry engine every weekday at 08:50 IST (it exits itself at 15:40)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:50:00 Asia/Kolkata
+Persistent=true
+Unit=sensex-expiry.service
+
+[Install]
+WantedBy=timers.target

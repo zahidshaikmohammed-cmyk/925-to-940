@@ -1,7 +1,7 @@
 # SENSEX Expiry — Zero→Hero Engine v1.0 (research build)
 
 > `sensex_expiry/` is a separate, fully mechanical engine for **SENSEX weekly-expiry-day option
-> buying** through the Dhan API. Read **[SENSEX_EXPIRY_SPEC.md](SENSEX_EXPIRY_SPEC.md)** first. It covers
+> buying** through the Dhan API. Read **[SENSEX_EXPIRY_SPEC.md](SENSEX_EXPIRY_SPEC.md)** first. Live browser dashboard: **[DASHBOARD.md](DASHBOARD.md)**. It covers
 > the research, the Dhan capability audit, the architecture, and the locked constitution (§39).
 > **No edge has been shown on real data yet**, and live orders stay blocked by `validation_gate.py`
 > until walk-forward and paper gates pass. Commands: `python -m sensex_expiry --self-test`,

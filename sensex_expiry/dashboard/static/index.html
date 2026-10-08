@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="control-token" content="__CONTROL_TOKEN__">
+<title>SENSEX Expiry Engine</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="viz-root">
+<header class="topbar">
+  <div class="brand">
+    <h1>SENSEX Expiry Engine</h1>
+    <span class="sub" id="meta-line">connecting…</span>
+  </div>
+  <div class="badges" id="badges"></div>
+  <div class="controls" role="group" aria-label="Engine controls">
+    <button id="btn-arm" class="btn" type="button">ARM</button>
+    <button id="btn-disarm" class="btn" type="button">DISARM</button>
+    <button id="btn-pause" class="btn" type="button">PAUSE NEW ENTRIES</button>
+    <button id="btn-squareoff" class="btn btn-danger" type="button">EMERGENCY SQUARE-OFF</button>
+  </div>
+</header>
+
+<div id="banners" aria-live="assertive"></div>
+
+<main>
+  <section class="tiles">
+    <article class="tile hero">
+      <h2>SENSEX</h2>
+      <div class="hero-num" id="spot">—</div>
+      <div class="muted" id="spot-sub">—</div>
+    </article>
+    <article class="tile">
+      <h2>Engine state</h2>
+      <div class="big" id="engine-state">—</div>
+      <div class="muted" id="engine-sub">—</div>
+    </article>
+    <article class="tile">
+      <h2>Regime</h2>
+      <div class="big" id="regime">—</div>
+      <div class="muted" id="regime-sub">—</div>
+    </article>
+    <article class="tile">
+      <h2>Day P&amp;L</h2>
+      <div class="big" id="pnl">—</div>
+      <div class="muted" id="pnl-sub">—</div>
+    </article>
+  </section>
+
+  <section class="grid-2">
+    <article class="card">
+      <div class="card-head"><h2>SENSEX today, 1-minute closes</h2><span class="muted" id="chart-note"></span></div>
+      <div id="chart" class="chart" role="img" aria-label="SENSEX one-minute closes with reference levels"></div>
+      <details class="table-view"><summary>Table view</summary><div id="chart-table"></div></details>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Position</h2><span id="pos-badge"></span></div>
+      <dl class="kv" id="position"></dl>
+    </article>
+  </section>
+
+  <section class="grid-3">
+    <article class="card">
+      <div class="card-head"><h2>Active setup / last decision</h2></div>
+      <dl class="kv" id="decision"></dl>
+      <div class="codes" id="reason-last"></div>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Risk usage</h2></div>
+      <div id="risk"></div>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Data &amp; connection</h2></div>
+      <dl class="kv" id="data"></dl>
+    </article>
+  </section>
+
+  <section class="grid-2">
+    <article class="card">
+      <div class="card-head"><h2>Orders</h2></div>
+      <dl class="kv" id="orders"></dl>
+      <div id="open-orders"></div>
+    </article>
+    <article class="card">
+      <div class="card-head"><h2>Reason codes today</h2><span class="muted">decisions per code</span></div>
+      <div id="reason-counts" class="barlist"></div>
+    </article>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Trades today</h2></div>
+    <div class="scroll"><table id="trades"></table></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Audit log</h2>
+      <span id="audit-verify" class="muted"></span>
+      <label class="filter">Kind
+        <select id="audit-kind">
+          <option value="">All</option><option>DECISION</option><option>GUARD_BLOCK</option><option>ORDER</option>
+          <option>FILL</option><option>STOP_MODIFIED</option><option>EXIT_ORDER</option><option>TRADE_CLOSED</option>
+          <option>CONTROL</option><option>KILL_SWITCH</option>
+        </select>
+      </label>
+    </div>
+    <div class="scroll tall"><table id="audit"></table></div>
+    <button id="audit-more" class="btn btn-quiet" type="button">Load older</button>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Control history &amp; state transitions</h2></div>
+    <div class="grid-2 inner">
+      <div class="scroll"><table id="control-log"></table></div>
+      <div class="scroll"><table id="transitions"></table></div>
+    </div>
+  </section>
+</main>
+</div>
+
+<dialog id="confirm">
+  <form method="dialog" id="confirm-form">
+    <h2 id="confirm-title">Confirm</h2>
+    <p id="confirm-text"></p>
+    <ul id="confirm-blockers" class="blockers"></ul>
+    <label id="confirm-phrase-wrap">Type <code id="confirm-phrase"></code> to confirm
+      <input id="confirm-input" autocomplete="off" spellcheck="false">
+    </label>
+    <label id="token-wrap" hidden>Control token
+      <input id="token-input" autocomplete="off" spellcheck="false">
+    </label>
+    <p id="confirm-result" class="result" role="status"></p>
+    <div class="dialog-actions">
+      <button value="cancel" class="btn btn-quiet" type="submit" formnovalidate>Cancel</button>
+      <button id="confirm-go" class="btn" type="button">Confirm</button>
+    </div>
+  </form>
+</dialog>
+<div id="tooltip" class="tooltip" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

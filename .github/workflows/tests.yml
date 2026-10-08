@@ -35,4 +35,4 @@ jobs:
       - name: 945 production-scale benchmark (989 stocks, integrated path)
         run: python 945.py --benchmark
       - name: Verify systemd units
-        run: systemd-analyze verify deploy/systemd/psygrid-945.timer deploy/systemd/psygrid-945.service
+        run: systemd-analyze verify deploy/systemd/psygrid-945.timer deploy/systemd/psygrid-945.service deploy/systemd/sensex-expiry.timer deploy/systemd/sensex-expiry.service

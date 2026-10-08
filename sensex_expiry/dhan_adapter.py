@@ -175,7 +175,10 @@ class DhanBroker:
                           datetime.now(IST))
 
     def place(self, req: OrderRequest) -> OrderState:
-        self._require_armed()
+        # the system is long-only: a BUY opens risk and needs the arm; a SELL only ever reduces
+        # a position (exit, stop, square-off) and must work even after DISARM
+        if req.side == "BUY":
+            self._require_armed()
         resp = self.c.place_order(security_id=req.security_id, exchange_segment=req.exchange_segment,
                                   transaction_type=req.side, quantity=req.qty, order_type=req.order_type,
                                   product_type=req.product, price=req.price, trigger_price=req.trigger_price,

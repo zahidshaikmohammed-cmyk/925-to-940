@@ -1,0 +1,33 @@
+# SENSEX expiry engine + local dashboard. Starts DISARMED every day; arming happens only
+# from the dashboard (ARM LIVE also needs a passing validation report for the running
+# config hash). The dashboard listens on 127.0.0.1:8765 only: from your PC use
+#   ssh -N -L 8765:127.0.0.1:8765 <vps>      then open http://127.0.0.1:8765
+[Unit]
+Description=SENSEX expiry engine with browser dashboard (starts DISARMED)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sensexexp
+Group=sensexexp
+WorkingDirectory=/opt/sensex-expiry
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+# DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN and SENSEX_MODE (paper|live) live here, mode 0600, root-owned.
+EnvironmentFile=/etc/sensex-expiry.env
+ExecStart=/usr/bin/python3 -m sensex_expiry.session --feed dhan --mode ${SENSEX_MODE} \
+          --state-dir /var/lib/sensex-expiry --report /var/lib/sensex-expiry/validation_gate_report.json \
+          --host 127.0.0.1 --port 8765 --exit-after 15:40
+# A crash restarts the process DISARMED; the kill-switch lock (if tripped) survives restarts.
+Restart=on-failure
+RestartSec=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/sensex-expiry
+StateDirectory=sensex-expiry
+
+[Install]
+WantedBy=multi-user.target

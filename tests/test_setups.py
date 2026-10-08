@@ -183,6 +183,31 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(eng._arm("ORB", "S001", 1, 1000.0, 999.9, now, now, []))      # 0.01% risk
         self.assertIsNotNone(eng._arm("ORB", "S002", 1, 1000.0, 990.0, now, now, []))
 
+    def test_paytm_2026_10_08_is_never_signalled(self):
+        """Late start at 09:26: PAYTM SHORT, trigger 1582, stop 1656, previous close 1732, price 1565."""
+        from intelligence.setups import EMPTY_BASE
+        eng = SetupEngine(self.cfg, COST)
+        eng.reset(self.day)
+        now = at(self.day, 9, 26)
+        base = {"PAYTM": replace(EMPTY_BASE, prev_close=1732.0), "OK": replace(EMPTY_BASE, prev_close=100.0)}
+        eng._ctx = ({}, base, {}, {"PAYTM": [(now - timedelta(minutes=1), 1570, 1572, 1564, 1565.1, 1)],
+                                   "OK": [(now - timedelta(minutes=1), 100.5, 100.6, 100.4, 100.5, 1)]})
+        self.assertIsNone(eng._arm("ORB", "PAYTM", -1, 1582.0, 1656.0, now, now, []))   # stop 4.7% away
+        self.assertIsNone(eng._arm("ORB", "PAYTM", -1, 1582.0, 1600.0, now, now, []))   # 8.7% down already
+        base["PAYTM"] = replace(EMPTY_BASE, prev_close=1640.0)
+        self.assertIsNone(eng._arm("ORB", "PAYTM", -1, 1582.0, 1600.0, now, now, []))   # break already happened
+        self.assertIsNotNone(eng._arm("ORB", "OK", -1, 100.0, 101.0, now, now + timedelta(minutes=30), []))
+
+    def test_a_bar_opening_well_past_the_trigger_is_a_missed_trade(self):
+        eng = SetupEngine(self.cfg, COST)
+        eng.reset(self.day)
+        now = at(self.day, 10, 0)
+        eng._arm("ORB", "S001", -1, 100.0, 101.0, now, now + timedelta(minutes=30), [])
+        fine = {"S001": [(now, 99.0, 99.2, 98.8, 99.0, 1)]}                           # opened 1% below
+        events = eng.step(self.day, {}, {}, now + timedelta(minutes=2), fine)
+        self.assertEqual([(e.kind, e.trade["exit_reason"]) for e in events], [("EXPIRED", "MISSED")])
+        self.assertIsNone(eng.trades[0].entry)
+
     def test_vwap_trend_pullback_arms_and_exits_on_vwap_close(self):
         base = self.index.baselines(self.day)
         p = base["S007"].prev_close

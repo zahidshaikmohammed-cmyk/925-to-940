@@ -257,7 +257,7 @@ def _scan_banner(cfg: ScanConfig, scanner: Scanner) -> None:
 
 def setup_config(args) -> SetupConfig:
     from dataclasses import replace
-    return replace(SetupConfig(), orb_stop=args.orb_stop)
+    return replace(SetupConfig(), orb_stop=args.orb_stop, target_r=args.target_r)
 
 
 def history_dir(args) -> Path:
@@ -485,7 +485,9 @@ def cmd_scan(args, weights) -> int:
             latest = (stocks, index)
             if not scanned - {cutoff}:
                 save_universe(args, stocks)
-            if not args.no_archive and (cutoff.minute % 15 == 0 or cutoff == last):
+            # Every 15 minutes, and every minute from 14:45: the feed clears its candles at 15:15.
+            late = cutoff.astimezone(IST).time() >= time(14, 45)
+            if not args.no_archive and (cutoff.minute % 15 == 0 or late or cutoff == last):
                 saved = save_session(args.data_dir, today, stocks, index) or saved
             for ev in events:                          # trade updates first, then the scan line
                 journal.write(ev)
@@ -512,7 +514,7 @@ def cmd_scan(args, weights) -> int:
                             alert_beep()
                             print(render_trigger(ev.trade, setups.stats, cfg.risk_rupees), flush=True)
                             continue
-                        if ev.kind in ("STOP", "EXIT_VWAP", "SQUARE_OFF") and not muted:
+                        if ev.kind in ("STOP", "TARGET", "EXIT_VWAP", "SQUARE_OFF") and not muted:
                             beep()
                         print(render_setup_update(ev, setups.stats), flush=True)
                 except Exception as exc:                # a setup bug never stops the scanner
@@ -635,6 +637,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-setups", action="store_true", help="scan: run without the research setups")
     p.add_argument("--no-yahoo", action="store_true", help="scan: never try to download Yahoo history")
     p.add_argument("--symbols", help="bootstrap: file with the symbols to download (one per line or JSON)")
+    p.add_argument("--target-r", type=float, default=None,
+                   help="setups: book the profit at this many R (e.g. 2); the stop and VWAP/15:15 exits stay")
     p.add_argument("--orb-stop", default="range", choices=("range", "atr10"),
                    help="ORB stop: other side of the 09:15 bar (default) or the paper's 10%% of daily ATR")
     args = p.parse_args(argv)

@@ -87,6 +87,7 @@ class SetupConfig:
     max_day_move_pct: float = 7.0            # never trade a stock already 7% from its previous close
     max_risk_pct: float = 3.0                # never arm a setup whose stop is more than 3% away
     max_fill_slip_pct: float = 0.5           # a bar opening further than 0.5% past the trigger = missed
+    target_r: float | None = None            # optional profit target in R (e.g. 2.0); None = original exits only
 
 
 # --------------------------------------------------------------------------- bars
@@ -150,6 +151,7 @@ class SetupTrade:
     net_pct: float | None = None
     seen_to: str = ""                  # bars before this time are processed
     prev_close: float | None = None    # for the day-move gate at the trigger
+    target: float | None = None        # profit target price (only with SetupConfig.target_r)
     vwap_checked_to: str = ""          # VWT: 5-min bars ending at or before this are checked
 
     @property
@@ -517,10 +519,16 @@ class SetupEngine:
                     return events
                 t.entry = round(entry, 2)
                 t.entry_time, t.state, fill_bar = ts.isoformat(), "OPEN", True
+                if cfg.target_r:
+                    t.target = round(t.entry + d * cfg.target_r * abs(t.entry - t.stop), 2)
                 events.append(SetupEvent("TRIGGERED", ts.isoformat(), t.to_dict()))
             if (d > 0 and l <= t.stop) or (d < 0 and h >= t.stop):
                 gap = not fill_bar and d * (o - t.stop) < 0
                 self._close(t, o if gap else t.stop, ts, "STOP", events)
+                return events
+            if t.target is not None and ((d > 0 and h >= t.target) or (d < 0 and l <= t.target)):
+                gap = not fill_bar and d * (o - t.target) > 0             # opened beyond the target
+                self._close(t, o if gap else t.target, ts, "TARGET", events)
                 return events
             if ts + width >= square:
                 self._close(t, c, ts, "SQUARE_OFF", events)
@@ -610,7 +618,7 @@ def setup_stats(trades: list[SetupTrade], min_trades: int = 30) -> dict:
                       "profit_factor": round(gain / loss, 2) if loss > 0 else None,
                       "first_half_avg_r": first, "second_half_avg_r": second,
                       "exits": {k: sum(1 for t in closed if t.exit_reason == k)
-                                for k in ("STOP", "EXIT_VWAP", "SQUARE_OFF")},
+                                for k in ("STOP", "TARGET", "EXIT_VWAP", "SQUARE_OFF")},
                       "status": status}
     return out
 
@@ -711,6 +719,8 @@ def render_trigger(t: dict, stats: dict, risk_rupees: float | None = None) -> st
              f"Rs {t['trigger']:.2f}, armed {_hm(t['armed_at'])})",
              f"STOP LOSS    : Rs {t['stop']:.2f}   risk Rs {risk:.2f}/share ({risk / t['entry'] * 100:.2f}%)",
              f"EXIT PLAN    : {plan}"]
+    if t.get("target") is not None:
+        lines.append(f"TARGET       : Rs {t['target']:.2f} (profit is booked there)")
     if risk_rupees:
         lines.append(f"QUANTITY     : {int(risk_rupees // (risk + t['cost_pct'] / 100 * t['entry']))} shares "
                      f"for Rs {risk_rupees:,.0f} risk incl. costs")

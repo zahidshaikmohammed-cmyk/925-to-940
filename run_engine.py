@@ -20,6 +20,7 @@ BASE_URL = "http://140.245.226.102:10000"
 # The two-node PSYGRID Live Core: same /public/live.json contract, 989-stock universe (bbbbb.py uses it).
 LIVE_CORE_URL = "http://129.225.112.47:10000"
 LAST_STATUS: str | None = None  # status of the latest main() scan (read by bbbbb_plus)
+LAST_SELECTED: "Candidate | None" = None  # the #1 of the latest main() scan (read by fno.py --watch)
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
@@ -403,7 +404,7 @@ NO_TRADE_REASONS = {
 }
 
 
-def print_no_trade(status: str, selected: Candidate, pick: Pick | None) -> None:
+def print_no_trade(status: str, selected: Candidate, pick: Pick | None, rerun_hint: str = "bbbbb.py") -> None:
     """No trade plan is printed for a stock that must not be traded."""
     print("\n" + "=" * 96)
     print(f"⛔ NO TRADE NOW: {NO_TRADE_REASONS[status]}")
@@ -415,7 +416,7 @@ def print_no_trade(status: str, selected: Candidate, pick: Pick | None) -> None:
         print(f"BLOCKED BY   : {' | '.join(pick.blockers)}")
     else:
         print(f"CLOSEST      : {closest}, forced pick: not a setup)")
-    print("ACTION       : do nothing. Rerun bbbbb.py in a few minutes.")
+    print(f"ACTION       : do nothing. Rerun {rerun_hint} in a few minutes.")
 
 
 def print_breadth(b: Breadth) -> None:
@@ -488,7 +489,10 @@ def run_self_test() -> int:
     return 0 if result.wasSuccessful() else 10
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, cfg_overrides: dict | None = None,
+         universe: set[str] | None = None, mode_note: str | None = None, rerun_hint: str = "bbbbb.py") -> int:
+    """``cfg_overrides`` replace StrategyConfig fields; ``universe`` keeps only those symbols
+    (fno.py uses both); ``mode_note`` is printed under the banner."""
     parser = argparse.ArgumentParser(description="PSYGRID any-time 990-stock scanner")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
     parser.add_argument("--preflight-only", action="store_true", help="inspect the atomic 990-stock public endpoint and exit")
@@ -504,7 +508,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return run_self_test()
 
-    cfg = StrategyConfig()
+    global LAST_STATUS, LAST_SELECTED
+    LAST_STATUS = LAST_SELECTED = None
+    cfg = replace(StrategyConfig(), **(cfg_overrides or {}))
     if args.min_turnover is not None:
         cfg = replace(cfg, min_median_turnover_rupees=max(0.0, args.min_turnover))
     cfg.validate()
@@ -514,6 +520,9 @@ def main(argv: list[str] | None = None) -> int:
     sectors = load_sector_map()
 
     print_banner()
+    if mode_note:
+        print(mode_note)
+        print("=" * 96)
     now = now_ist()
     today = now.date()
     audit.event("ENGINE_START", base_url=args.base_url, mode="ANY_TIME_SCAN_INTRADAY_NO_PREVIOUS_CLOSE")
@@ -538,6 +547,11 @@ def main(argv: list[str] | None = None) -> int:
     # scoring one snapshot after preflighting a different snapshot.
     try:
         raw = client.market()
+        if universe is not None:
+            raw = {s: v for s, v in raw.items() if s in universe}
+            missing = sorted(universe - set(raw))
+            print(f"UNIVERSE FILTER: {len(raw)} of {len(universe)} listed symbols found in the feed"
+                  + (f" | not in feed: {', '.join(missing[:12])}{' ...' if len(missing) > 12 else ''}" if missing else ""))
     except Exception as exc:
         print(f"FATAL: no usable stock feed returned: {exc}")
         audit.event("FATAL_NO_USABLE_FEED", error=str(exc))
@@ -568,7 +582,7 @@ def main(argv: list[str] | None = None) -> int:
     unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
 
     print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S.%f} IST")
-    print(f"UNIVERSE     : {len(parsed)}/{args.expected_universe} unique stocks received")
+    print(f"UNIVERSE     : {len(parsed)}/{len(universe) if universe is not None else args.expected_universe} unique stocks received")
     print(f"HEALTHY      : {len(healthy)}")
     print(f"SKIPPED      : {len(unhealthy)} stock(s) failed per-stock feed checks")
     print(f"SHARD ISSUES : {len(client.last_market_errors)}")
@@ -647,14 +661,13 @@ def main(argv: list[str] | None = None) -> int:
             print_exit_timing(timing, fill_time)
         print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
     else:
-        print_no_trade(status, selected, pick)
+        print_no_trade(status, selected, pick, rerun_hint)
     print_picks(picks)
     if not picks:
         print_shortlist(candidates)
-    global LAST_STATUS
-    LAST_STATUS = status
+    LAST_STATUS, LAST_SELECTED = status, selected
     print(f"\nSTATUS: {status}")
-    print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
+    print(f"MODE: ONE-SHOT INTRADAY SCAN — rerun {rerun_hint} whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
     audit.event(
         status,

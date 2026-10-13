@@ -20,6 +20,7 @@ BASE_URL = "http://140.245.226.102:10000"
 # The two-node PSYGRID Live Core: same /public/live.json contract, 989-stock universe (bbbbb.py uses it).
 LIVE_CORE_URL = "http://129.225.112.47:10000"
 LAST_STATUS: str | None = None  # status of the latest main() scan (read by bbbbb_plus)
+LAST_SELECTED: "Candidate | None" = None  # the #1 of the latest main() scan (read by fno.py --watch)
 SESSION_START = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 
@@ -403,7 +404,7 @@ NO_TRADE_REASONS = {
 }
 
 
-def print_no_trade(status: str, selected: Candidate, pick: Pick | None) -> None:
+def print_no_trade(status: str, selected: Candidate, pick: Pick | None, rerun_hint: str = "bbbbb.py") -> None:
     """No trade plan is printed for a stock that must not be traded."""
     print("\n" + "=" * 96)
     print(f"⛔ NO TRADE NOW: {NO_TRADE_REASONS[status]}")
@@ -415,7 +416,7 @@ def print_no_trade(status: str, selected: Candidate, pick: Pick | None) -> None:
         print(f"BLOCKED BY   : {' | '.join(pick.blockers)}")
     else:
         print(f"CLOSEST      : {closest}, forced pick: not a setup)")
-    print("ACTION       : do nothing. Rerun bbbbb.py in a few minutes.")
+    print(f"ACTION       : do nothing. Rerun {rerun_hint} in a few minutes.")
 
 
 def print_breadth(b: Breadth) -> None:
@@ -507,6 +508,8 @@ def main(argv: list[str] | None = None, *, cfg_overrides: dict | None = None,
     if args.self_test:
         return run_self_test()
 
+    global LAST_STATUS, LAST_SELECTED
+    LAST_STATUS = LAST_SELECTED = None
     cfg = replace(StrategyConfig(), **(cfg_overrides or {}))
     if args.min_turnover is not None:
         cfg = replace(cfg, min_median_turnover_rupees=max(0.0, args.min_turnover))
@@ -658,12 +661,11 @@ def main(argv: list[str] | None = None, *, cfg_overrides: dict | None = None,
             print_exit_timing(timing, fill_time)
         print(f"STOP ORDER   : place the SL at ₹{selected.stop:.2f} together with the entry, never after")
     else:
-        print_no_trade(status, selected, pick)
+        print_no_trade(status, selected, pick, rerun_hint)
     print_picks(picks)
     if not picks:
         print_shortlist(candidates)
-    global LAST_STATUS
-    LAST_STATUS = status
+    LAST_STATUS, LAST_SELECTED = status, selected
     print(f"\nSTATUS: {status}")
     print(f"MODE: ONE-SHOT INTRADAY SCAN — rerun {rerun_hint} whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")

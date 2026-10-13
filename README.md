@@ -6,7 +6,9 @@
 > `python 945.py --scan-replay data/sessions`. See RUNBOOK.md. The original 09:45 single
 > decision is `python 945.py --daemon`.
 
-> **F&O deep-pullback scan:** `python fno.py` runs the `bbbbb.py` impulse + retracement engine on
+> **F&O deep-pullback hunter:** `python fno.py` hunts from 09:15 to 15:00, rescanning every minute, and
+> beeps (with the full trade plan) only when the #1 is a Tier 1 `SIGNAL_READY`; `--once` for a single
+> scan, `--until 14:30` to stop earlier. It runs the `bbbbb.py` impulse + retracement engine on
 > F&O stocks only (stocks with an option chain; NSE's list, refreshed weekly into
 > `data/fno_cache.json`, falling back to `fno_stocks.json`). Only deep pullbacks qualify: 50–78.6%
 > of the impulse for a strict setup (scored best at 61.8%), 45–85% for Tier 2. Same entry, stop and

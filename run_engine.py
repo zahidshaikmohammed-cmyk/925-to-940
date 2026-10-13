@@ -496,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-universe", type=int, default=EXPECTED_UNIVERSE, help="universe_size the feed must declare")
     parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds (default: strategy config)")
     parser.add_argument("--min-turnover", type=float, default=None,
-                        help="minimum median rupee turnover per minute (default 500000; 0 = off)")
+                        help="minimum median rupee turnover per minute "
+                             f"(default {StrategyConfig.min_median_turnover_rupees:,.0f}; 0 = off)")
     parser.add_argument("--risk-rupees", type=float, default=None, help="rupees you accept losing at the stop; prints the share quantity")
     args = parser.parse_args(argv)
 

@@ -7,14 +7,13 @@
 > decision is `python 945.py --daemon`.
 
 > **Flat breakout scan:** `python flat.py` rescans once a minute (8 s past each minute, until
-> 15:00) and beeps three times only on a confirmed new setup (score ≥ 70 held for 2 straight
-> minutes, at most one alert per 15 minutes, the same stock again only after an hour;
-> `--alert-score 75` for fewer); it lists stocks that opened within ±1% of the previous
-> close and have **never** moved 1% up or down today, ranked by how tightly they are coiling
-> (last 15 minutes in a 0.15–0.8% box, candles shrinking, volume rising, price leaning on one
-> edge). The #1 pick gets a bracket: buy above the box high or sell below the box low, 2R target,
-> cancel the other leg on a fill and cancel both after 15 minutes. `--max-move-pct 0.75` tightens
-> the flat band; `--risk-rupees N` prints quantity. `--once` scans a single time; `--until 14:30` ends the watch earlier. Start it any time;
+> 15:00). Stocks that opened within ±1% of the previous close and have **never** moved 1% up or
+> down today, sitting in a 0.15–0.8% box over the last 15 minutes, form a silent watchlist: no
+> trade while they stay inside. It beeps only when one **breaks out**: the newest candle closes
+> outside the box with ≥3x normal volume and a ≥60% body. Entry is a stop order just beyond that
+> candle (cancel after 3 minutes), stop at the box middle, 2R target. One alert per 5 minutes; the
+> same stock again after an hour. `--min-volume 4` for fewer, stronger breakouts; `--risk-rupees N`
+> prints quantity; `--once` scans a single time; `--until 14:30` ends earlier. Start it any time;
 > it waits for 09:30 by itself.
 
 Local Python engine for NSE cash equities. **Psygrid remains the live data source; this repository performs the strategy mathematics locally and ignores Psygrid's precomputed indicators.**

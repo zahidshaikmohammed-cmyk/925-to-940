@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 engine_audit.jsonl
+flat_audit.jsonl
 active_trade.json
 snapshots/
 index_levels.json

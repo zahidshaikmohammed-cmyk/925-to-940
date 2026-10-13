@@ -6,6 +6,13 @@
 > `python 945.py --scan-replay data/sessions`. See RUNBOOK.md. The original 09:45 single
 > decision is `python 945.py --daemon`.
 
+> **Flat breakout scan:** `python flat.py` lists stocks that opened within ±1% of the previous
+> close and have **never** moved 1% up or down today, ranked by how tightly they are coiling
+> (last 15 minutes in a 0.15–0.8% box, candles shrinking, volume rising, price leaning on one
+> edge). The #1 pick gets a bracket: buy above the box high or sell below the box low, 2R target,
+> cancel the other leg on a fill and cancel both after 15 minutes. `--max-move-pct 0.75` tightens
+> the flat band; `--risk-rupees N` prints quantity. Run from 09:30 onward.
+
 Local Python engine for NSE cash equities. **Psygrid remains the live data source; this repository performs the strategy mathematics locally and ignores Psygrid's precomputed indicators.**
 
 ## Exact operating sequence

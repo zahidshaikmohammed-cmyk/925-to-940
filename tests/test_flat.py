@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import flat
@@ -106,6 +108,75 @@ class FlatFilterTests(unittest.TestCase):
             flat.print_table([p], self.cfg)
         self.assertIn("BUY >", out.getvalue())
         self.assertIn("stop-entry ABOVE", out.getvalue())
+
+
+class WatchModeTests(unittest.TestCase):
+    """The minute loop: beep once per new setup, not again while its bracket is alive."""
+
+    def setUp(self):
+        self.cfg = flat.FlatConfig()
+        self.pick, _ = flat.evaluate(stock("COIL", coil()), 100.0, self.cfg)
+
+    def run_watch(self, start: datetime, scans, until: str = "10:10"):
+        clock = [start]
+        beeps, calls = [], []
+
+        def fetch(client, engine_cfg, cfg):
+            item = scans[min(len(calls), len(scans) - 1)]
+            calls.append(clock[0])
+            if isinstance(item, Exception):
+                raise item
+            return flat.ScanResult(clock[0], {"COIL": stock("COIL", coil())}, item, {}, 1, {})
+
+        def sleep(seconds):
+            clock[0] += timedelta(seconds=seconds)
+
+        args = type("Args", (), {"until": until, "scan_offset": 8, "risk_rupees": None})()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = flat.watch(None, None, self.cfg, run_audit(), args,
+                              clock=lambda: clock[0], sleep=sleep, beep=lambda: beeps.append(clock[0]), fetch=fetch)
+        return code, beeps, calls, out.getvalue()
+
+    def test_beeps_once_per_new_setup_and_scans_every_minute(self):
+        start = NOON.replace(minute=0, second=8)
+        code, beeps, calls, out = self.run_watch(start, [[], [self.pick], [self.pick], [self.pick]])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(beeps), 1)
+        self.assertEqual(beeps[0], start + timedelta(minutes=1))
+        self.assertEqual(len(calls), 10)  # 10:00 .. 10:09
+        self.assertTrue(all(c.second == 8 for c in calls))
+        self.assertIn("NEW FLAT SETUP", out)
+        self.assertIn("already alerted", out)
+
+    def test_realerts_after_the_bracket_expires(self):
+        start = NOON.replace(minute=0, second=8)
+        _, beeps, _, _ = self.run_watch(start, [[self.pick]], until="10:20")
+        self.assertEqual([b - start for b in beeps], [timedelta(0), timedelta(minutes=15)])
+
+    def test_watch_picks_below_setup_score_never_beep(self):
+        weak = replace(self.pick, score=self.cfg.min_score - 1)
+        _, beeps, _, _ = self.run_watch(NOON.replace(second=8), [[weak]])
+        self.assertEqual(beeps, [])
+
+    def test_feed_error_is_retried_not_fatal(self):
+        _, beeps, calls, out = self.run_watch(NOON.replace(second=8), [flat.FeedError(30, "down"), [self.pick]])
+        self.assertGreater(len(calls), 2)
+        self.assertEqual(len(beeps), 1)
+        self.assertIn("retrying next minute", out)
+
+    def test_waits_for_the_box_before_the_first_scan(self):
+        _, _, calls, out = self.run_watch(NOON.replace(hour=9, minute=20, second=0), [[]], until="09:33")
+        self.assertEqual(calls[0], NOON.replace(hour=9, minute=30, second=8))
+        self.assertIn("waiting for 15 candles", out)
+
+    def test_next_scan_is_offset_past_the_next_minute(self):
+        self.assertEqual(flat.seconds_to_next_scan(NOON.replace(second=50), 8), 18)
+        self.assertEqual(flat.seconds_to_next_scan(NOON.replace(second=8, microsecond=500_000), 8), 59.5)
+
+
+def run_audit():
+    import tempfile
+    return flat.Audit(os.path.join(tempfile.mkdtemp(), "flat_audit.jsonl"))
 
 
 if __name__ == "__main__":

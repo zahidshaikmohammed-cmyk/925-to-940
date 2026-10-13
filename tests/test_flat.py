@@ -1,4 +1,4 @@
-"""flat.py: only stocks that opened flat and stayed within ±1% qualify; a tight, squeezing box scores high."""
+"""flat.py: flat stocks form a watchlist; only a volume breakout out of the box is a signal."""
 
 from __future__ import annotations
 
@@ -36,6 +36,17 @@ def coil(rising_volume: bool = True) -> tuple[Candle, ...]:
     return day(early + box, vols)
 
 
+def breakout(up: bool = True, volume: float = 50_000, close: float | None = None) -> tuple[Candle, ...]:
+    """coil() plus one 10:00 candle that closes through the box (99.88-100.34) on volume."""
+    cs = coil()
+    t = cs[-1].ts + timedelta(minutes=1)
+    if up:
+        c = close if close is not None else 100.60
+        return cs + (Candle(t, 100.30, c + 0.02, 100.28, c, volume),)
+    c = close if close is not None else 99.60
+    return cs + (Candle(t, 99.92, 99.94, c - 0.02, c, volume),)
+
+
 def stock(symbol: str, candles, previous_close: float | None = PREV) -> StockData:
     return StockData(symbol, candles, candles[-1].close, previous_close, Health(symbol, True))
 
@@ -44,15 +55,11 @@ class FlatFilterTests(unittest.TestCase):
     def setUp(self):
         self.cfg = flat.FlatConfig()
 
-    def test_flat_coil_qualifies_with_a_bracket(self):
+    def test_flat_coil_joins_the_watchlist(self):
         picks, dropped = flat.scan({"COIL": stock("COIL", coil())}, {"COIL": {"today_open": 100.0}}, self.cfg)
         self.assertEqual([p.symbol for p in picks], ["COIL"], dropped)
-        p = picks[0]
-        self.assertEqual(p.bias, "LONG")
-        self.assertGreater(p.long_trigger, p.box_high)
-        self.assertLess(p.short_trigger, p.box_low)
-        self.assertAlmostEqual(p.long_target - p.long_trigger, 2 * (p.long_trigger - p.long_stop))
-        self.assertLess(p.contraction, 1.0)
+        self.assertEqual(picks[0].bias, "LONG")
+        self.assertLess(picks[0].contraction, 1.0)
 
     def test_gap_of_one_percent_is_rejected(self):
         d = stock("GAP", coil())
@@ -101,26 +108,89 @@ class FlatFilterTests(unittest.TestCase):
         picks, dropped = flat.scan({"BAD": d}, {}, self.cfg)
         self.assertEqual((picks, dropped), ([], {}))
 
-    def test_printing_a_pick_does_not_crash(self):
-        p, _ = flat.evaluate(stock("COIL", coil()), 100.0, self.cfg)
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            flat.print_pick(p, self.cfg, NOON, 500.0, coil())
-            flat.print_table([p], self.cfg)
-        self.assertIn("BUY >", out.getvalue())
-        self.assertIn("stop-entry ABOVE", out.getvalue())
 
 
-class WatchModeTests(unittest.TestCase):
-    """The minute loop: a confirmed, rate-limited alert, never a beep every minute."""
+class BreakoutTests(unittest.TestCase):
+    """The only signal: a flat stock's newest candle closes through its box on volume."""
 
     def setUp(self):
         self.cfg = flat.FlatConfig()
-        self.pick, _ = flat.evaluate(stock("COIL", coil()), 100.0, self.cfg)  # scores ~77
 
-    def p(self, symbol: str, score: float):
-        return replace(self.pick, symbol=symbol, score=score)
+    def detect(self, candles, today_open=100.0):
+        return flat.detect_breakout(stock("X", candles), today_open, self.cfg)
+
+    def test_sideways_coil_is_not_a_signal(self):
+        self.assertIsNone(self.detect(coil()))  # the 2026-10-13 complaint: no move, no alert
+
+    def test_volume_breakout_up(self):
+        b = self.detect(breakout())
+        self.assertEqual(b.side, "LONG")
+        self.assertAlmostEqual(b.entry, 100.67)
+        self.assertAlmostEqual(b.stop, (b.box_high + b.box_low) / 2)
+        self.assertAlmostEqual(b.target - b.entry, 2 * (b.entry - b.stop))
+        self.assertAlmostEqual(b.volume_ratio, 5.0)
+
+    def test_volume_breakout_down(self):
+        b = self.detect(breakout(up=False))
+        self.assertEqual(b.side, "SHORT")
+        self.assertLess(b.entry, b.box_low)
+        self.assertGreater(b.stop, b.entry)
+        self.assertLess(b.target, b.entry)
+
+    def test_breakout_without_volume_is_ignored(self):
+        self.assertIsNone(self.detect(breakout(volume=20_000)))  # 2x, needs 3x
+
+    def test_close_back_inside_the_box_is_ignored(self):
+        self.assertIsNone(self.detect(breakout(close=100.33)))
+
+    def test_wick_without_a_body_is_ignored(self):
+        cs = coil()
+        wick = Candle(cs[-1].ts + timedelta(minutes=1), 100.30, 100.80, 100.25, 100.42, 50_000)
+        self.assertIsNone(self.detect(cs + (wick,)))
+
+    def test_stock_that_already_moved_before_the_break_is_not_flat(self):
+        cs = list(breakout())
+        cs[5] = Candle(cs[5].ts, cs[5].open, 101.05, cs[5].low, cs[5].close, cs[5].volume)
+        self.assertIsNone(self.detect(tuple(cs)))
+
+    def test_the_breakout_candle_itself_may_pass_one_percent(self):
+        b = self.detect(breakout(close=101.02, volume=80_000))
+        self.assertIsNotNone(b)
+        self.assertGreater(flat.pct(b.close, PREV), 1.0)
+
+    def test_stop_too_far_is_skipped(self):
+        self.assertIsNone(flat.detect_breakout(stock("X", breakout(close=101.10, volume=80_000)), 100.0,
+                                               flat.FlatConfig(max_risk_pct=0.5)))
+
+    def test_find_breakouts_ranks_by_volume(self):
+        parsed = {"A": stock("A", breakout(volume=40_000)), "B": stock("B", breakout(volume=90_000)),
+                  "C": stock("C", coil())}
+        found = flat.find_breakouts(parsed, {s: {"today_open": 100.0} for s in parsed}, self.cfg)
+        self.assertEqual([b.symbol for b in found], ["B", "A"])
+
+    def test_printing_a_breakout_does_not_crash(self):
+        b = self.detect(breakout())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            flat.print_breakout(b, self.cfg, NOON, 500.0, breakout())
+            flat.print_table(flat.scan({"C": stock("C", coil())}, {}, self.cfg)[0], self.cfg)
+        self.assertIn("BREAKOUT: X UP", out.getvalue())
+        self.assertIn("stop-entry ABOVE ₹100.67", out.getvalue())
+        self.assertIn("WATCHLIST", out.getvalue())
+
+
+class WatchModeTests(unittest.TestCase):
+    """The minute loop beeps on breakouts only, one at a time."""
+
+    def setUp(self):
+        self.cfg = flat.FlatConfig()
+        self.watch_pick, _ = flat.evaluate(stock("COIL", coil()), 100.0, self.cfg)
+        self.brk = flat.detect_breakout(stock("COIL", breakout()), 100.0, self.cfg)
+
+    def b(self, symbol: str, volume_ratio: float = 5.0):
+        return replace(self.brk, symbol=symbol, volume_ratio=volume_ratio)
 
     def run_watch(self, start: datetime, scans, until: str = "10:10"):
+        """``scans``: per minute, a list of breakouts (or an exception); the watchlist is always COIL."""
         clock = [start]
         beeps, calls = [], []
 
@@ -129,8 +199,9 @@ class WatchModeTests(unittest.TestCase):
             calls.append(clock[0])
             if isinstance(item, Exception):
                 raise item
-            picks = sorted(item, key=lambda p: -p.score)
-            return flat.ScanResult(clock[0], {p.symbol: stock(p.symbol, coil()) for p in picks}, picks, {}, 1, {})
+            parsed = {s: stock(s, breakout()) for s in {b.symbol for b in item} | {"COIL"}}
+            return flat.ScanResult(clock[0], parsed, [self.watch_pick], {}, 1, {},
+                                   breakouts=sorted(item, key=lambda b: -b.volume_ratio))
 
         def sleep(seconds):
             clock[0] += timedelta(seconds=seconds)
@@ -141,51 +212,42 @@ class WatchModeTests(unittest.TestCase):
                               clock=lambda: clock[0], sleep=sleep, beep=lambda: beeps.append(clock[0]), fetch=fetch)
         return code, beeps, calls, out.getvalue()
 
-    def test_rotating_stocks_near_the_line_do_not_beep_every_minute(self):
-        """The 2026-10-13 complaint: eight stocks around 60-75, a different one on top each minute."""
-        names = ["BPCL", "PETRONET", "CASTROLIND", "VOGL", "SBIN", "BRITANNIA", "ICICIBANK", "MARICO"]
-        scans = []
-        for minute in range(60):
-            scans.append([self.p(n, 72.0 if (i + minute) % 8 == 0 else 62.0 + i) for i, n in enumerate(names)])
-        _, beeps, calls, _ = self.run_watch(NOON.replace(second=8), scans, until="11:00")
+    def test_a_watchlist_alone_never_beeps(self):
+        _, beeps, calls, out = self.run_watch(NOON.replace(second=8), [[]], until="11:00")
         self.assertEqual(len(calls), 60)
-        self.assertEqual(beeps, [])  # no stock held >= 70 for two straight minutes
+        self.assertEqual(beeps, [])
+        self.assertIn("no breakout", out)
+        self.assertIn("watching COIL", out)
 
-    def test_steady_strong_coil_alerts_once_after_confirmation(self):
+    def test_breakout_beeps_at_once_and_scans_every_minute(self):
         start = NOON.replace(second=8)
-        code, beeps, calls, out = self.run_watch(start, [[], [self.pick]])
+        code, beeps, calls, out = self.run_watch(start, [[], [self.b("COIL")], []])
         self.assertEqual(code, 0)
-        self.assertEqual(beeps, [start + timedelta(minutes=2)])  # seen at 10:01, confirmed at 10:02
+        self.assertEqual(beeps, [start + timedelta(minutes=1)])
         self.assertEqual(len(calls), 10)
         self.assertTrue(all(c.second == 8 for c in calls))
-        self.assertIn("NEW FLAT SETUP", out)
-        self.assertIn("confirming 1/2", out)
-        self.assertIn("quiet until 10:17", out)
+        self.assertIn("FLAT BREAKOUT", out)
+        self.assertIn("BREAKOUT: COIL UP", out)
 
-    def test_cooldown_holds_back_a_second_stock_for_one_bracket_lifetime(self):
+    def test_one_alert_at_a_time(self):
         start = NOON.replace(second=8)
-        _, beeps, _, out = self.run_watch(start, [[self.pick, self.p("OTHER", 75.0)]], until="10:30")
-        self.assertEqual([b - start for b in beeps], [timedelta(minutes=1), timedelta(minutes=16)])
-        self.assertIn("OTHER", out.split("NEW FLAT SETUP")[2])
+        scans = [[self.b("A")], [self.b("B")], [self.b("C")], [], [], [self.b("D")]]
+        _, beeps, _, out = self.run_watch(start, scans)
+        self.assertEqual([b - start for b in beeps], [timedelta(0), timedelta(minutes=5)])
+        self.assertIn("held back", out)
+
+    def test_strongest_breakout_wins_the_minute(self):
+        _, beeps, _, out = self.run_watch(NOON.replace(second=8), [[self.b("WEAK", 3.2), self.b("STRONG", 8.0)], []])
+        self.assertEqual(len(beeps), 1)
+        self.assertIn("FLAT BREAKOUT @ 10:00:08 IST: STRONG", out)
 
     def test_same_stock_realerts_only_after_an_hour(self):
         start = NOON.replace(second=8)
-        _, beeps, _, _ = self.run_watch(start, [[self.pick]], until="11:10")
-        self.assertEqual([b - start for b in beeps], [timedelta(minutes=1), timedelta(minutes=61)])
-
-    def test_scores_below_alert_score_never_beep(self):
-        _, beeps, _, out = self.run_watch(NOON.replace(second=8), [[self.p("MID", self.cfg.alert_score - 0.1)]])
-        self.assertEqual(beeps, [])
-        self.assertIn("alerts at ≥ 70", out)
-
-    def test_a_dip_resets_the_confirmation(self):
-        start = NOON.replace(second=8)
-        scans = [[self.pick], [self.p("COIL", 65.0)], [self.pick], [self.pick]]
-        _, beeps, _, _ = self.run_watch(start, scans)
-        self.assertEqual(beeps, [start + timedelta(minutes=3)])
+        _, beeps, _, _ = self.run_watch(start, [[self.b("COIL")]], until="11:10")
+        self.assertEqual([b - start for b in beeps], [timedelta(0), timedelta(minutes=60)])
 
     def test_feed_error_is_retried_not_fatal(self):
-        _, beeps, calls, out = self.run_watch(NOON.replace(second=8), [flat.FeedError(30, "down"), [self.pick]])
+        _, beeps, calls, out = self.run_watch(NOON.replace(second=8), [flat.FeedError(30, "down"), [self.b("COIL")]])
         self.assertGreater(len(calls), 3)
         self.assertEqual(len(beeps), 1)
         self.assertIn("retrying next minute", out)

@@ -1,19 +1,19 @@
-"""FLAT: stocks that opened flat, stayed flat, and are coiling for a breakout.
+"""FLAT: stocks that stayed flat all day, alerted only when one actually breaks out.
 
-A stock qualifies only if all of these hold against its previous close:
+A stock is flat only if all of these hold against its previous close:
   - it OPENED within ±1% (no gap),
   - its day HIGH and day LOW so far are both within ±1% (it never moved 1% either way),
   - it is still within ±1% now.
 
-Among those, it looks for a coil that is about to release: the last 15 minutes form a
-tight box, the candles inside it are shrinking, volume is picking up, and price is
-leaning on one edge of the box. Each pick gets a bracket: buy above the box high,
-sell below the box low. Whichever triggers first is the trade; cancel the other.
+Flat stocks sitting in a tight 15-minute box form a silent WATCHLIST. Nothing is traded
+while they stay inside: most sideways stocks simply stay sideways. The alert fires only
+when the newest completed candle CLOSES outside the box with at least 3x normal volume
+and a real body. Entry: stop order just beyond that candle; stop at the box middle
+(back there = failed breakout); 2R target.
 
-    python flat.py                    # rescan every minute, beep on a confirmed new setup (Ctrl+C stops)
-    python flat.py --alert-score 75   # fewer, stronger alerts
+    python flat.py                    # rescan every minute, beep on a breakout (Ctrl+C stops)
     python flat.py --once             # one scan, then exit
-    python flat.py --max-move-pct 0.75
+    python flat.py --min-volume 4     # fewer, stronger breakouts
     python flat.py --risk-rupees 500  # also print share quantity
     python flat.py --self-test
 """
@@ -46,14 +46,16 @@ class FlatConfig:
     recent_bars: int = 5           # "now" inside the box (contraction and volume pickup)
     volume_baseline_bars: int = 30
     reward_r: float = 2.0          # target = trigger ± reward_r × box width
-    trigger_valid_minutes: int = 15
-    min_score: float = 60.0        # below this the pick is a watch, not a setup
-    # Watch-mode alerts. Many flat stocks hover around 60, so a bare "score >= 60 and not seen
-    # before" beeped nearly every minute. An alert now needs all of:
-    alert_score: float = 70.0      # a clearly strong coil, not one hovering at the setup line
-    alert_confirm_scans: int = 2   # ... held for this many consecutive minutes (not a one-scan blip)
-    alert_cooldown_minutes: int = 15   # ... and no other alert in the last bracket lifetime: one trade at a time
-    symbol_realert_minutes: int = 60   # the same stock alerts again only after this long
+    # Alerts fire on a confirmed BREAKOUT, never on the coil alone: predicting which sideways
+    # stock will move picked stocks that simply stayed sideways (2026-10-13). The newest
+    # completed candle must close outside the box of the 15 candles before it, with:
+    breakout_volume_ratio: float = 3.0   # its volume >= this x the median of the 30 candles before it
+    breakout_body_ratio: float = 0.6     # a real body, not a wick poking out: |close-open| / range
+    breakout_clear_pct: float = 0.05     # close at least this far (%) beyond the box edge
+    max_risk_pct: float = 1.0            # skip when the stop (box middle) is further than this from entry
+    entry_valid_minutes: int = 3         # cancel the entry order if not filled in this many minutes
+    alert_cooldown_minutes: int = 5      # one alert at a time
+    symbol_realert_minutes: int = 60     # the same stock alerts again only after this long
     show: int = 10
 
     def validate(self) -> None:
@@ -63,8 +65,9 @@ class FlatConfig:
             raise ValueError("min_box_pct must be > 0 and below max_box_pct")
         if self.recent_bars >= self.box_bars:
             raise ValueError("recent_bars must be shorter than box_bars")
-        if self.alert_confirm_scans < 1 or self.alert_cooldown_minutes < 0 or self.symbol_realert_minutes < 0:
-            raise ValueError("invalid alert settings")
+        if (self.breakout_volume_ratio <= 0 or not 0 <= self.breakout_body_ratio <= 1 or self.max_risk_pct <= 0
+                or self.alert_cooldown_minutes < 0 or self.symbol_realert_minutes < 0):
+            raise ValueError("invalid breakout/alert settings")
 
 
 @dataclass(frozen=True)
@@ -85,12 +88,6 @@ class FlatPick:
     volume_ratio: float      # recent mean volume / baseline median volume
     box_position: float      # 0 = at the box low, 1 = at the box high
     vwap: float
-    long_trigger: float
-    long_stop: float
-    long_target: float
-    short_trigger: float
-    short_stop: float
-    short_target: float
 
 
 def pct(x: float, base: float) -> float:
@@ -171,10 +168,6 @@ def evaluate(d: StockData, today_open: float, cfg: FlatConfig) -> tuple[FlatPick
     agree = 1.0 if bias != "EITHER" else 0.0
     score = 100.0 * (0.25 * tight + 0.20 * coil + 0.20 * volume + 0.15 * edge + 0.10 * lean + 0.10 * agree)
 
-    tick = 0.05
-    long_trigger, short_trigger = hi + tick, lo - tick
-    long_stop, short_stop = lo - tick, hi + tick
-    risk = long_trigger - long_stop
     return FlatPick(
         symbol=d.symbol, bias=bias, score=round(score, 2),
         previous_close=d.previous_close, today_open=today_open, ltp=last,
@@ -183,8 +176,6 @@ def evaluate(d: StockData, today_open: float, cfg: FlatConfig) -> tuple[FlatPick
         day_low_pct=pct(min(c.low for c in d.candles), d.previous_close),
         box_high=hi, box_low=lo, box_pct=box_pct, contraction=contraction, volume_ratio=volume_ratio,
         box_position=position, vwap=vw,
-        long_trigger=long_trigger, long_stop=long_stop, long_target=long_trigger + cfg.reward_r * risk,
-        short_trigger=short_trigger, short_stop=short_stop, short_target=short_trigger - cfg.reward_r * risk,
     ), ""
 
 
@@ -207,59 +198,125 @@ def scan(parsed: dict[str, StockData], raw: dict[str, dict], cfg: FlatConfig) ->
     return picks, dropped
 
 
+@dataclass(frozen=True)
+class Breakout:
+    symbol: str
+    side: str                # LONG (up through the box high) or SHORT (down through the box low)
+    candle_time: datetime    # the breakout candle's start
+    previous_close: float
+    today_open: float
+    close: float             # the breakout candle's close
+    box_high: float
+    box_low: float
+    box_pct: float
+    volume_ratio: float      # breakout candle volume / median of the 30 candles before it
+    body_ratio: float
+    entry: float             # stop-entry just beyond the breakout candle's extreme
+    stop: float              # the box middle: back there, the breakout has failed
+    target: float
+    risk_pct: float
+
+
+def detect_breakout(d: StockData, today_open: float | None, cfg: FlatConfig) -> Breakout | None:
+    """A flat stock whose newest completed candle broke its box on volume, else None.
+
+    Everything before that candle must pass the flat rules; the breakout candle itself
+    may take the stock past ±max_move_pct — that is the move.
+    """
+    if len(d.candles) < cfg.box_bars + 1:
+        return None
+    setup, bar = d.candles[:-1], d.candles[-1]
+    if flat_reject(replace(d, candles=setup), today_open, cfg) is not None:
+        return None
+    box = setup[-cfg.box_bars:]
+    hi, lo = max(c.high for c in box), min(c.low for c in box)
+    box_pct = (hi - lo) / box[-1].close * 100.0
+    if not cfg.min_box_pct <= box_pct <= cfg.max_box_pct:
+        return None
+    baseline = median(c.volume for c in setup[-cfg.volume_baseline_bars:])
+    volume_ratio = bar.volume / baseline if baseline > 0 else 0.0
+    rng = bar.high - bar.low
+    body_ratio = abs(bar.close - bar.open) / rng if rng > 0 else 0.0
+    if volume_ratio < cfg.breakout_volume_ratio or body_ratio < cfg.breakout_body_ratio:
+        return None
+    clear = cfg.breakout_clear_pct / 100.0
+    if bar.close >= hi * (1 + clear) and bar.close > bar.open:
+        side, entry = "LONG", bar.high + 0.05
+    elif bar.close <= lo * (1 - clear) and bar.close < bar.open:
+        side, entry = "SHORT", bar.low - 0.05
+    else:
+        return None
+    stop = (hi + lo) / 2.0
+    risk = abs(entry - stop)
+    risk_pct = risk / entry * 100.0
+    if risk_pct > cfg.max_risk_pct:
+        return None
+    sign = 1 if side == "LONG" else -1
+    return Breakout(
+        symbol=d.symbol, side=side, candle_time=bar.ts, previous_close=d.previous_close, today_open=today_open,
+        close=bar.close, box_high=hi, box_low=lo, box_pct=box_pct, volume_ratio=volume_ratio, body_ratio=body_ratio,
+        entry=entry, stop=stop, target=entry + sign * cfg.reward_r * risk, risk_pct=risk_pct,
+    )
+
+
+def find_breakouts(parsed: dict[str, StockData], raw: dict[str, dict], cfg: FlatConfig) -> list[Breakout]:
+    """Every healthy flat stock breaking out on its newest candle, strongest volume first."""
+    out = []
+    for symbol, d in parsed.items():
+        if d.health.healthy and d.candles:
+            b = detect_breakout(d, opening_price(d, raw.get(symbol) or {}), cfg)
+            if b:
+                out.append(b)
+    out.sort(key=lambda b: (-b.volume_ratio, b.symbol))
+    return out
+
+
 def print_banner(cfg: FlatConfig) -> None:
     print("=" * 96)
-    print("PSYGRID // FLAT — OPENED FLAT, STAYED FLAT, COILING FOR A BREAKOUT")
+    print("PSYGRID // FLAT — FLAT ALL DAY, THEN A CONFIRMED BREAKOUT")
     print("=" * 96)
     print(f"Flat = open, day high, day low and LTP all within ±{cfg.max_move_pct:g}% of previous close")
-    print(f"Coil = last {cfg.box_bars} min in a {cfg.min_box_pct:g}–{cfg.max_box_pct:g}% box, candles shrinking, volume rising")
-    print("Trade = bracket: BUY above the box high or SELL below the box low; first to trigger wins, cancel the other")
+    print(f"Watchlist = flat stocks in a {cfg.min_box_pct:g}–{cfg.max_box_pct:g}% box over the last {cfg.box_bars} min "
+          f"(no trade while they stay inside)")
+    print(f"Signal = a candle CLOSES outside the box with ≥ {cfg.breakout_volume_ratio:g}x volume and a "
+          f"≥ {cfg.breakout_body_ratio:.0%} body; stop at the box middle, {cfg.reward_r:g}R target")
     print("=" * 96)
 
 
-def print_pick(p: FlatPick, cfg: FlatConfig, scan_time: datetime, risk_rupees: float | None, candles) -> None:
+def print_breakout(b: Breakout, cfg: FlatConfig, scan_time: datetime, risk_rupees: float | None, candles) -> None:
+    word = "ABOVE" if b.side == "LONG" else "BELOW"
+    edge = b.box_high if b.side == "LONG" else b.box_low
     print("\n" + "-" * 96)
-    status = "FLAT SETUP" if p.score >= cfg.min_score else "BEST FLAT STOCK (WATCH ONLY, SCORE BELOW SETUP LEVEL)"
-    print(f"🏆 #1 {status}")
+    print(f"🚀 BREAKOUT: {b.symbol} {'UP' if b.side == 'LONG' else 'DOWN'} -> {b.side}")
     print("-" * 96)
-    print(f"SYMBOL       : {p.symbol}")
-    print(f"SCORE        : {p.score:.2f}/100 (setup at ≥ {cfg.min_score:g})")
-    print(f"BIAS         : {p.bias}" + ("" if p.bias != "EITHER" else " (no lean: take whichever side breaks)"))
-    print(f"PREV CLOSE   : ₹{p.previous_close:.2f} | OPEN ₹{p.today_open:.2f} ({p.gap_pct:+.2f}%) | LTP ₹{p.ltp:.2f} "
-          f"({pct(p.ltp, p.previous_close):+.2f}%)")
-    print(f"DAY RANGE    : {p.day_low_pct:+.2f}% to {p.day_high_pct:+.2f}% vs previous close")
-    print(f"BOX ({cfg.box_bars}m)    : ₹{p.box_low:.2f} – ₹{p.box_high:.2f} ({p.box_pct:.2f}% wide) | "
-          f"price at {p.box_position:.0%} of the box")
-    print(f"CONTRACTION  : {p.contraction:.2f}x (last {cfg.recent_bars} candles vs earlier; <1 = squeezing)")
-    print(f"VOLUME       : {p.volume_ratio:.2f}x baseline (last {cfg.recent_bars} min)")
-    print(f"VWAP         : ₹{p.vwap:.2f} (price {'above' if p.ltp > p.vwap else 'below'})")
-    sides = [("LONG ", p.long_trigger, p.long_stop, p.long_target, "ABOVE"),
-             ("SHORT", p.short_trigger, p.short_stop, p.short_target, "BELOW")]
-    if p.bias == "SHORT":
-        sides.reverse()
-    for name, trig, stop, target, word in sides:
-        print(f"{name} LEG    : stop-entry {word} ₹{trig:.2f} | SL ₹{stop:.2f} | TP ₹{target:.2f} ({cfg.reward_r:g}R)")
-        if risk_rupees:
-            per_share = abs(trig - stop)
-            qty = int(risk_rupees // per_share) if per_share > 0 else 0
-            minutes = order_minutes_of_turnover(qty * trig, candles, StrategyConfig())
-            print(f"               qty {qty} = ₹{risk_rupees:.0f} risk at ₹{per_share:.2f}/share "
-                  f"({minutes:.1f} min of median turnover)")
-    expiry = (scan_time + timedelta(minutes=cfg.trigger_valid_minutes)).strftime("%H:%M")
-    print(f"RULES        : one leg fills -> cancel the other at once | cancel both if neither fills by {expiry}")
-    print("               place the SL with the entry, never after")
+    print(f"PREV CLOSE   : ₹{b.previous_close:.2f} | OPEN ₹{b.today_open:.2f} ({pct(b.today_open, b.previous_close):+.2f}%)"
+          f" | flat until the {b.candle_time.astimezone(IST):%H:%M} candle")
+    print(f"BOX ({cfg.box_bars}m)    : ₹{b.box_low:.2f} – ₹{b.box_high:.2f} ({b.box_pct:.2f}% wide)")
+    print(f"BREAK CANDLE : {b.candle_time.astimezone(IST):%H:%M} closed ₹{b.close:.2f} "
+          f"({pct(b.close, edge):+.2f}% past the box) | volume {b.volume_ratio:.1f}x | body {b.body_ratio:.0%}")
+    print(f"ENTRY        : stop-entry {word} ₹{b.entry:.2f} (only if the move continues)")
+    print(f"STOP LOSS    : ₹{b.stop:.2f} (box middle: back here = failed breakout) | risk {b.risk_pct:.2f}%")
+    print(f"TARGET       : ₹{b.target:.2f} ({cfg.reward_r:g}R)")
+    if risk_rupees:
+        per_share = abs(b.entry - b.stop)
+        qty = int(risk_rupees // per_share) if per_share > 0 else 0
+        minutes = order_minutes_of_turnover(qty * b.entry, candles, StrategyConfig())
+        print(f"QUANTITY     : {qty} shares = ₹{risk_rupees:.0f} risk at ₹{per_share:.2f}/share "
+              f"({minutes:.1f} min of median turnover)")
+    expiry = (scan_time + timedelta(minutes=cfg.entry_valid_minutes)).strftime("%H:%M")
+    print(f"RULES        : cancel the entry if not filled by {expiry} | place the SL with the entry, never after")
 
 
 def print_table(picks: list[FlatPick], cfg: FlatConfig) -> None:
     if not picks:
         return
-    print(f"\nTOP {min(cfg.show, len(picks))} FLAT COILS:")
+    print(f"\nWATCHLIST — TOP {min(cfg.show, len(picks))} FLAT BOXES (no trade until one breaks out):")
     print(f"  {'#':>2} {'SYMBOL':<14}{'BIAS':<7}{'SCORE':>6}{'GAP':>8}{'DAY LO/HI %':>16}{'BOX%':>7}"
-          f"{'SQZ':>6}{'VOL':>6}{'BUY >':>11}{'SELL <':>11}")
+          f"{'SQZ':>6}{'VOL':>6}{'BOX HI':>11}{'BOX LO':>11}")
     for i, p in enumerate(picks[:cfg.show], 1):
         print(f"  {i:>2} {p.symbol:<14}{p.bias:<7}{p.score:>6.1f}{p.gap_pct:>+7.2f}%"
               f"{p.day_low_pct:>+8.2f}/{p.day_high_pct:+.2f}{p.box_pct:>7.2f}{p.contraction:>6.2f}"
-              f"{p.volume_ratio:>6.2f}{p.long_trigger:>11.2f}{p.short_trigger:>11.2f}")
+              f"{p.volume_ratio:>6.2f}{p.box_high:>11.2f}{p.box_low:>11.2f}")
 
 
 def run_self_test() -> int:
@@ -284,6 +341,7 @@ class ScanResult:
     dropped: dict[str, int]
     healthy: int
     preflight: dict[str, dict]
+    breakouts: list[Breakout] = field(default_factory=list)
 
 
 def fetch_scan(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfig) -> ScanResult:
@@ -301,6 +359,7 @@ def fetch_scan(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfi
     picks, dropped = scan(parsed, raw, cfg)
     return ScanResult(
         scan_time=scan_time, parsed=parsed, picks=picks, dropped=dropped,
+        breakouts=find_breakouts(parsed, raw, cfg),
         healthy=sum(1 for d in parsed.values() if d.health.healthy),
         preflight={ENDPOINT_PATH: {
             "ok": bool(raw), "count": len(raw), "declared": meta.get("declared_stock_count"),
@@ -310,35 +369,34 @@ def fetch_scan(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfi
     )
 
 
-def status_of(picks: list[FlatPick], cfg: FlatConfig) -> str:
-    if not picks:
-        return "NO_FLAT_SETUP"
-    return "FLAT_SETUP" if picks[0].score >= cfg.min_score else "FLAT_WATCH"
+def status_of(r: ScanResult) -> str:
+    if r.breakouts:
+        return "FLAT_BREAKOUT"
+    return "WATCHING" if r.picks else "NO_FLAT_STOCKS"
 
 
-def print_report(r: ScanResult, cfg: FlatConfig, risk_rupees: float | None, best: FlatPick | None = None) -> str:
-    """The full scan report; ``best`` overrides which pick gets the #1 card. Returns the status."""
+def print_report(r: ScanResult, cfg: FlatConfig, risk_rupees: float | None, best: Breakout | None = None) -> str:
+    """The full scan report; ``best`` is the breakout to show first. Returns the status."""
     print_preflight(r.preflight)
     print(f"SCAN TIME    : {r.scan_time:%Y-%m-%d %H:%M:%S} IST")
     print(f"UNIVERSE     : {len(r.parsed)} | HEALTHY {r.healthy} | skipped {len(r.parsed) - r.healthy} (stale/thin feed)")
-    print(f"FLAT COILS   : {len(r.picks)} of {r.healthy} healthy stocks")
+    print(f"FLAT BOXES   : {len(r.picks)} of {r.healthy} healthy stocks | breakouts this minute: {len(r.breakouts)}")
     if r.dropped:
-        print("NOT FLAT / NO COIL:")
+        print("NOT FLAT / NO BOX:")
         for reason, count in sorted(r.dropped.items(), key=lambda kv: -kv[1]):
             print(f"  {reason:<20}: {count}")
     failure_counts, _ = health_failure_report(r.parsed)
     if failure_counts:
         top = ", ".join(f"{reason}={n}" for reason, n in failure_counts.most_common(3))
         print(f"HEALTH FAILS : {top}")
-    status = status_of(r.picks, cfg)
-    if not r.picks:
-        print("\nSTATUS: NO_FLAT_SETUP — no healthy stock is flat and coiling right now.")
-        return status
-    best = best or r.picks[0]
-    print_pick(best, cfg, r.scan_time, risk_rupees, r.parsed[best.symbol].candles)
-    print_table(r.picks, cfg)
-    print(f"\nSTATUS: {status}")
-    print("NOTE: deterministic research signal; a coil can break either way or fake out. Not a guarantee of profit.")
+    shown = ([best] if best else []) + [b for b in r.breakouts if b is not best]
+    for b in shown:
+        print_breakout(b, cfg, r.scan_time, risk_rupees, r.parsed[b.symbol].candles)
+    broke = {b.symbol for b in r.breakouts}
+    print_table([p for p in r.picks if p.symbol not in broke], cfg)
+    status = status_of(r)
+    print(f"\nSTATUS: {status}" + ("" if r.breakouts else " — no flat stock has broken out on volume this minute"))
+    print("NOTE: deterministic research signal; breakouts can fail. Not a guarantee of profit.")
     return status
 
 
@@ -357,44 +415,31 @@ def alert_beep() -> None:
 @dataclass
 class AlertState:
     """What the watch loop remembers between minutes."""
-    streak: dict[str, int] = field(default_factory=dict)          # consecutive scans at alert_score or above
     alerted: dict[str, datetime] = field(default_factory=dict)    # symbol -> last alert time
     last_alert: datetime | None = None
 
 
-def next_alert(picks: list[FlatPick], state: AlertState, now: datetime, cfg: FlatConfig) -> FlatPick | None:
-    """Update the streaks with this scan and return the one pick to alert on, if any.
-
-    The best-scoring pick that has held ``alert_score`` for ``alert_confirm_scans`` straight
-    scans, was not alerted in the last ``symbol_realert_minutes``, and only when no alert at all
-    fired in the last ``alert_cooldown_minutes``.
-    """
-    strong = {p.symbol for p in picks if p.score >= cfg.alert_score}
-    state.streak = {s: state.streak.get(s, 0) + 1 for s in strong}
+def next_alert(breakouts: list[Breakout], state: AlertState, now: datetime, cfg: FlatConfig) -> Breakout | None:
+    """The strongest breakout not alerted in ``symbol_realert_minutes``, outside the global cooldown."""
     if state.last_alert and now - state.last_alert < timedelta(minutes=cfg.alert_cooldown_minutes):
         return None
     realert = timedelta(minutes=cfg.symbol_realert_minutes)
-    for p in picks:  # sorted best first
-        if (state.streak.get(p.symbol, 0) >= cfg.alert_confirm_scans
-                and (p.symbol not in state.alerted or now - state.alerted[p.symbol] >= realert)):
-            return p
+    for b in breakouts:  # strongest volume first
+        if b.symbol not in state.alerted or now - state.alerted[b.symbol] >= realert:
+            return b
     return None
 
 
-def watch_note(picks: list[FlatPick], state: AlertState, now: datetime, cfg: FlatConfig) -> str:
-    """Why the #1 did not alert this minute, for the one-line quiet output."""
-    if not picks:
-        return "no flat coil"
-    top = picks[0]
-    lead = f"#1 {top.symbol} {top.score:.1f} {top.bias}"
-    if state.last_alert and now - state.last_alert < timedelta(minutes=cfg.alert_cooldown_minutes):
+def watch_note(r: ScanResult, state: AlertState, cfg: FlatConfig) -> str:
+    """One quiet line: what is being watched, and why nothing alerted."""
+    if r.breakouts and state.last_alert and r.scan_time - state.last_alert < timedelta(minutes=cfg.alert_cooldown_minutes):
         quiet = state.last_alert + timedelta(minutes=cfg.alert_cooldown_minutes)
-        return f"{lead} (quiet until {quiet:%H:%M}: last alert's bracket still live)"
-    if top.score < cfg.alert_score:
-        return f"{lead} (alerts at ≥ {cfg.alert_score:g})"
-    if top.symbol in state.alerted:
-        return f"{lead} (already alerted at {state.alerted[top.symbol]:%H:%M})"
-    return f"{lead} (confirming {state.streak.get(top.symbol, 0)}/{cfg.alert_confirm_scans})"
+        return f"breakout {r.breakouts[0].symbol} held back: one alert at a time until {quiet:%H:%M}"
+    if r.breakouts:
+        return f"breakout {r.breakouts[0].symbol} already alerted"
+    if not r.picks:
+        return "no flat stock to watch"
+    return "watching " + ", ".join(p.symbol for p in r.picks[:3])
 
 
 def seconds_to_next_scan(now: datetime, offset_seconds: int) -> float:
@@ -405,14 +450,13 @@ def seconds_to_next_scan(now: datetime, offset_seconds: int) -> float:
 
 def watch(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfig, audit: Audit, args,
           clock=now_ist, sleep=time.sleep, beep=alert_beep, fetch=fetch_scan) -> int:
-    """Rescan once a minute until ``args.until``; beep and print the card when a new setup appears."""
+    """Rescan once a minute until ``args.until``; beep and print the card when a flat stock breaks out."""
     until = datetime.strptime(args.until, "%H:%M").time()
     earliest = (datetime.combine(clock().date(), SESSION_START, IST) + timedelta(minutes=cfg.box_bars)).time()
     state = AlertState()
     print(f"WATCH MODE   : rescanning every minute until {until:%H:%M} IST | Ctrl+C to stop")
-    print(f"ALERTS       : beep only when a stock holds score ≥ {cfg.alert_score:g} for {cfg.alert_confirm_scans} "
-          f"straight minutes | max one alert per {cfg.alert_cooldown_minutes} min | "
-          f"same stock again after {cfg.symbol_realert_minutes} min")
+    print(f"ALERTS       : beep only when a flat stock BREAKS its box on ≥ {cfg.breakout_volume_ratio:g}x volume | "
+          f"one alert per {cfg.alert_cooldown_minutes} min | same stock again after {cfg.symbol_realert_minutes} min")
     while True:
         now = clock()
         if now.time() >= until:
@@ -429,24 +473,23 @@ def watch(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfig, au
         except FeedError as exc:
             print(f"{now:%H:%M:%S} {exc} (retrying next minute)", flush=True)
         else:
-            pick = next_alert(r.picks, state, r.scan_time, cfg)
-            if pick:
+            b = next_alert(r.breakouts, state, r.scan_time, cfg)
+            if b:
                 beep()
-                state.alerted[pick.symbol] = state.last_alert = r.scan_time
+                state.alerted[b.symbol] = state.last_alert = r.scan_time
                 print("\n" + "=" * 96)
-                print(f"🔔 NEW FLAT SETUP @ {r.scan_time:%H:%M:%S} IST: {pick.symbol} "
-                      f"(score ≥ {cfg.alert_score:g} for {state.streak[pick.symbol]} straight minutes)")
-                print_report(r, cfg, args.risk_rupees, best=pick)
-                audit.event("FLAT_NEW_SETUP", symbol=pick.symbol, pick=asdict(pick),
+                print(f"🔔 FLAT BREAKOUT @ {r.scan_time:%H:%M:%S} IST: {b.symbol} {b.side}")
+                print_report(r, cfg, args.risk_rupees, best=b)
+                audit.event("FLAT_BREAKOUT", symbol=b.symbol, breakout=asdict(b),
                             healthy=r.healthy, flat=len(r.picks), scan_time=r.scan_time.isoformat())
             else:
-                print(f"{r.scan_time:%H:%M:%S} no alert | healthy {r.healthy} | flat {len(r.picks)} | "
-                      f"{watch_note(r.picks, state, r.scan_time, cfg)}", flush=True)
+                print(f"{r.scan_time:%H:%M:%S} no breakout | healthy {r.healthy} | flat {len(r.picks)} | "
+                      f"{watch_note(r, state, cfg)}", flush=True)
         sleep(seconds_to_next_scan(clock(), args.scan_offset))
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="PSYGRID FLAT: opened flat, stayed flat, coiling for a breakout")
+    parser = argparse.ArgumentParser(description="PSYGRID FLAT: flat all day, then a confirmed breakout on volume")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
     parser.add_argument("--once", action="store_true", help="scan once and exit instead of rescanning every minute")
     parser.add_argument("--until", default="15:00", help="watch mode: stop rescanning at this IST time (default 15:00)")
@@ -460,15 +503,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-turnover", type=float, default=None,
                         help=f"minimum median rupee turnover per minute (default {StrategyConfig.min_median_turnover_rupees:,.0f}; 0 = off)")
     parser.add_argument("--risk-rupees", type=float, default=None, help="rupees you accept losing at the stop; prints share quantity")
-    parser.add_argument("--alert-score", type=float, default=FlatConfig.alert_score,
-                        help=f"watch mode: beep only at or above this score (default {FlatConfig.alert_score:g})")
+    parser.add_argument("--min-volume", type=float, default=FlatConfig.breakout_volume_ratio,
+                        help=f"breakout candle volume vs normal (default {FlatConfig.breakout_volume_ratio:g}x)")
     parser.add_argument("--show", type=int, default=FlatConfig.show, help="how many flat coils to list")
     args = parser.parse_args(argv)
 
     if args.self_test:
         return run_self_test()
 
-    cfg = FlatConfig(max_move_pct=args.max_move_pct, show=args.show, alert_score=args.alert_score)
+    cfg = FlatConfig(max_move_pct=args.max_move_pct, show=args.show, breakout_volume_ratio=args.min_volume)
     cfg.validate()
     engine_cfg = StrategyConfig()
     if args.min_turnover is not None:
@@ -511,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
         audit.event("FEED_ERROR", code=exc.code, error=str(exc))
         return exc.code
     status = print_report(r, cfg, args.risk_rupees)
-    audit.event(status, pick=asdict(r.picks[0]) if r.picks else None, healthy=r.healthy, flat=len(r.picks),
+    audit.event(status, breakouts=[asdict(b) for b in r.breakouts], healthy=r.healthy, flat=len(r.picks),
                 dropped=r.dropped, scan_time=r.scan_time.isoformat())
     return 0
 

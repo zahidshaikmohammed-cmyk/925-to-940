@@ -10,7 +10,8 @@ tight box, the candles inside it are shrinking, volume is picking up, and price 
 leaning on one edge of the box. Each pick gets a bracket: buy above the box high,
 sell below the box low. Whichever triggers first is the trade; cancel the other.
 
-    python flat.py                    # scan the Live Core feed now
+    python flat.py                    # rescan every minute, beep on each new setup (Ctrl+C stops)
+    python flat.py --once             # one scan, then exit
     python flat.py --max-move-pct 0.75
     python flat.py --risk-rupees 500  # also print share quantity
     python flat.py --self-test
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from statistics import median
@@ -257,9 +259,157 @@ def run_self_test() -> int:
     return 0 if result.wasSuccessful() else 10
 
 
+class FeedError(RuntimeError):
+    """No usable live snapshot this minute; ``code`` is the one-shot exit code."""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    scan_time: datetime
+    parsed: dict[str, StockData]
+    picks: list[FlatPick]
+    dropped: dict[str, int]
+    healthy: int
+    preflight: dict[str, dict]
+
+
+def fetch_scan(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfig) -> ScanResult:
+    """Fetch one live snapshot and rank its flat coils. Raises FeedError when the feed is unusable."""
+    try:
+        raw = client.market()
+    except Exception as exc:
+        raise FeedError(30, f"no usable stock feed returned: {exc}") from exc
+    meta = client.last_market_meta
+    live, why = feed_is_live(meta)
+    if not live:
+        raise FeedError(33, f"FEED NOT LIVE: {why}. No signal from non-live data.")
+    scan_time = now_ist()
+    parsed = precision_screen(parse_universe(client, raw, scan_time), engine_cfg, scan_time)
+    picks, dropped = scan(parsed, raw, cfg)
+    return ScanResult(
+        scan_time=scan_time, parsed=parsed, picks=picks, dropped=dropped,
+        healthy=sum(1 for d in parsed.values() if d.health.healthy),
+        preflight={ENDPOINT_PATH: {
+            "ok": bool(raw), "count": len(raw), "declared": meta.get("declared_stock_count"),
+            "universe_size": meta.get("universe_size"),
+            "error": "; ".join(client.last_market_errors) or None,
+        }},
+    )
+
+
+def status_of(picks: list[FlatPick], cfg: FlatConfig) -> str:
+    if not picks:
+        return "NO_FLAT_SETUP"
+    return "FLAT_SETUP" if picks[0].score >= cfg.min_score else "FLAT_WATCH"
+
+
+def print_report(r: ScanResult, cfg: FlatConfig, risk_rupees: float | None, best: FlatPick | None = None) -> str:
+    """The full scan report; ``best`` overrides which pick gets the #1 card. Returns the status."""
+    print_preflight(r.preflight)
+    print(f"SCAN TIME    : {r.scan_time:%Y-%m-%d %H:%M:%S} IST")
+    print(f"UNIVERSE     : {len(r.parsed)} | HEALTHY {r.healthy} | skipped {len(r.parsed) - r.healthy} (stale/thin feed)")
+    print(f"FLAT COILS   : {len(r.picks)} of {r.healthy} healthy stocks")
+    if r.dropped:
+        print("NOT FLAT / NO COIL:")
+        for reason, count in sorted(r.dropped.items(), key=lambda kv: -kv[1]):
+            print(f"  {reason:<20}: {count}")
+    failure_counts, _ = health_failure_report(r.parsed)
+    if failure_counts:
+        top = ", ".join(f"{reason}={n}" for reason, n in failure_counts.most_common(3))
+        print(f"HEALTH FAILS : {top}")
+    status = status_of(r.picks, cfg)
+    if not r.picks:
+        print("\nSTATUS: NO_FLAT_SETUP — no healthy stock is flat and coiling right now.")
+        return status
+    best = best or r.picks[0]
+    print_pick(best, cfg, r.scan_time, risk_rupees, r.parsed[best.symbol].candles)
+    print_table(r.picks, cfg)
+    print(f"\nSTATUS: {status}")
+    print("NOTE: deterministic research signal; a coil can break either way or fake out. Not a guarantee of profit.")
+    return status
+
+
+def alert_beep() -> None:
+    """A new setup: three loud beeps, so it is heard from across the room."""
+    print("\a", end="", flush=True)
+    try:
+        import winsound
+        for _ in range(3):
+            winsound.Beep(1500, 350)
+            time.sleep(0.12)
+    except Exception:
+        pass
+
+
+def new_setups(picks: list[FlatPick], alerted: dict[str, datetime], now: datetime, cfg: FlatConfig) -> list[FlatPick]:
+    """Setup-grade picks not alerted within the last ``trigger_valid_minutes`` (their bracket's lifetime)."""
+    window = timedelta(minutes=cfg.trigger_valid_minutes)
+    return [
+        p for p in picks
+        if p.score >= cfg.min_score and (p.symbol not in alerted or now - alerted[p.symbol] >= window)
+    ]
+
+
+def seconds_to_next_scan(now: datetime, offset_seconds: int) -> float:
+    """Seconds until ``offset_seconds`` past the next minute, when that minute's candle has closed."""
+    target = now.replace(second=0, microsecond=0) + timedelta(minutes=1, seconds=offset_seconds)
+    return max(1.0, (target - now).total_seconds())
+
+
+def watch(client: PsygridClient, engine_cfg: StrategyConfig, cfg: FlatConfig, audit: Audit, args,
+          clock=now_ist, sleep=time.sleep, beep=alert_beep, fetch=fetch_scan) -> int:
+    """Rescan once a minute until ``args.until``; beep and print the card when a new setup appears."""
+    until = datetime.strptime(args.until, "%H:%M").time()
+    earliest = (datetime.combine(clock().date(), SESSION_START, IST) + timedelta(minutes=cfg.box_bars)).time()
+    alerted: dict[str, datetime] = {}
+    print(f"WATCH MODE   : rescanning every minute until {until:%H:%M} IST | beeps on a NEW setup "
+          f"(score ≥ {cfg.min_score:g}) | Ctrl+C to stop")
+    while True:
+        now = clock()
+        if now.time() >= until:
+            print(f"\n{now:%H:%M:%S} watch window over ({until:%H:%M} IST). {len(alerted)} setup(s) alerted today.")
+            return 0
+        if now.time() < earliest:
+            wait = (datetime.combine(now.date(), earliest, IST) - now).total_seconds() + args.scan_offset
+            print(f"{now:%H:%M:%S} waiting for {cfg.box_bars} candles: first scan at "
+                  f"{earliest:%H:%M}:{args.scan_offset:02d} IST", flush=True)
+            sleep(max(1.0, wait))
+            continue
+        try:
+            r = fetch(client, engine_cfg, cfg)
+        except FeedError as exc:
+            print(f"{now:%H:%M:%S} {exc} (retrying next minute)", flush=True)
+        else:
+            fresh = new_setups(r.picks, alerted, r.scan_time, cfg)
+            if fresh:
+                beep()
+                for p in fresh:
+                    alerted[p.symbol] = r.scan_time
+                print("\n" + "=" * 96)
+                print(f"🔔 NEW FLAT SETUP @ {r.scan_time:%H:%M:%S} IST: {', '.join(p.symbol for p in fresh)}")
+                print_report(r, cfg, args.risk_rupees, best=fresh[0])
+                audit.event("FLAT_NEW_SETUP", symbols=[p.symbol for p in fresh], pick=asdict(fresh[0]),
+                            healthy=r.healthy, flat=len(r.picks), scan_time=r.scan_time.isoformat())
+            else:
+                top = r.picks[0] if r.picks else None
+                lead = f"#1 {top.symbol} {top.score:.1f} {top.bias}" if top else "no flat coil"
+                note = " (already alerted)" if top and top.symbol in alerted else ""
+                print(f"{r.scan_time:%H:%M:%S} no new setup | healthy {r.healthy} | flat {len(r.picks)} | "
+                      f"{lead}{note}", flush=True)
+        sleep(seconds_to_next_scan(clock(), args.scan_offset))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PSYGRID FLAT: opened flat, stayed flat, coiling for a breakout")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
+    parser.add_argument("--once", action="store_true", help="scan once and exit instead of rescanning every minute")
+    parser.add_argument("--until", default="15:00", help="watch mode: stop rescanning at this IST time (default 15:00)")
+    parser.add_argument("--scan-offset", type=int, default=8,
+                        help="watch mode: seconds past each minute to scan, so the candle has closed (default 8)")
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--expected-universe", type=int, default=EXPECTED_UNIVERSE)
     parser.add_argument("--timeout", type=float, default=None, help="HTTP timeout in seconds")
@@ -280,6 +430,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.min_turnover is not None:
         engine_cfg = replace(engine_cfg, min_median_turnover_rupees=max(0.0, args.min_turnover))
     engine_cfg.validate()
+    try:
+        datetime.strptime(args.until, "%H:%M")
+    except ValueError:
+        parser.error("--until must be HH:MM")
+    if not 0 <= args.scan_offset < 60:
+        parser.error("--scan-offset must be 0-59")
     audit = Audit("flat_audit.jsonl")
     timeout = args.timeout if args.timeout is not None else engine_cfg.http_timeout_seconds
     client = PsygridClient(args.base_url, timeout=timeout, expected_universe=args.expected_universe)
@@ -289,62 +445,30 @@ def main(argv: list[str] | None = None) -> int:
     if not is_trading_day(now.date()):
         print(f"NOT A NORMAL NSE EQUITY TRADING DAY: {now.date().isoformat()}")
         return 20
-    earliest = (datetime.combine(now.date(), SESSION_START, IST) + timedelta(minutes=cfg.box_bars)).time()
-    if now.time() < earliest:
-        print(f"Need {cfg.box_bars} completed candles for the box. Run at/after {earliest.strftime('%H:%M')} IST.")
-        return 22
     if now.time() >= MARKET_CLOSE:
         print(f"Market session is closed ({MARKET_CLOSE.strftime('%H:%M')} IST).")
         return 23
 
+    if not args.once:
+        try:
+            return watch(client, engine_cfg, cfg, audit, args)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+            return 0
+
+    earliest = (datetime.combine(now.date(), SESSION_START, IST) + timedelta(minutes=cfg.box_bars)).time()
+    if now.time() < earliest:
+        print(f"Need {cfg.box_bars} completed candles for the box. Run at/after {earliest.strftime('%H:%M')} IST.")
+        return 22
     try:
-        raw = client.market()
-    except Exception as exc:
-        print(f"FATAL: no usable stock feed returned: {exc}")
-        audit.event("FATAL_NO_USABLE_FEED", error=str(exc))
-        return 30
-    meta = client.last_market_meta
-    live, why = feed_is_live(meta)
-    if not live:
-        print(f"FEED NOT LIVE: {why}. No signal from non-live data.")
-        audit.event("FEED_NOT_LIVE", reason=why)
-        return 33
-    print_preflight({ENDPOINT_PATH: {
-        "ok": bool(raw), "count": len(raw), "declared": meta.get("declared_stock_count"),
-        "universe_size": meta.get("universe_size"),
-        "error": "; ".join(client.last_market_errors) or None,
-    }})
-
-    scan_time = now_ist()
-    parsed = precision_screen(parse_universe(client, raw, scan_time), engine_cfg, scan_time)
-    healthy = sum(1 for d in parsed.values() if d.health.healthy)
-    picks, dropped = scan(parsed, raw, cfg)
-
-    print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S} IST")
-    print(f"UNIVERSE     : {len(parsed)} | HEALTHY {healthy} | skipped {len(parsed) - healthy} (stale/thin feed)")
-    print(f"FLAT COILS   : {len(picks)} of {healthy} healthy stocks")
-    if dropped:
-        print("NOT FLAT / NO COIL:")
-        for reason, count in sorted(dropped.items(), key=lambda kv: -kv[1]):
-            print(f"  {reason:<20}: {count}")
-    failure_counts, _ = health_failure_report(parsed)
-    if failure_counts:
-        top = ", ".join(f"{r}={n}" for r, n in failure_counts.most_common(3))
-        print(f"HEALTH FAILS : {top}")
-
-    if not picks:
-        print("\nSTATUS: NO_FLAT_SETUP — no healthy stock is flat and coiling right now. Rerun in a few minutes.")
-        audit.event("NO_FLAT_SETUP", healthy=healthy, dropped=dropped, scan_time=scan_time.isoformat())
-        return 0
-
-    best = picks[0]
-    print_pick(best, cfg, scan_time, args.risk_rupees, parsed[best.symbol].candles)
-    print_table(picks, cfg)
-    status = "FLAT_SETUP" if best.score >= cfg.min_score else "FLAT_WATCH"
-    print(f"\nSTATUS: {status}")
-    print("NOTE: deterministic research signal; a coil can break either way or fake out. Not a guarantee of profit.")
-    audit.event(status, pick=asdict(best), healthy=healthy, flat=len(picks), dropped=dropped,
-                scan_time=scan_time.isoformat())
+        r = fetch_scan(client, engine_cfg, cfg)
+    except FeedError as exc:
+        print(f"FATAL: {exc}")
+        audit.event("FEED_ERROR", code=exc.code, error=str(exc))
+        return exc.code
+    status = print_report(r, cfg, args.risk_rupees)
+    audit.event(status, pick=asdict(r.picks[0]) if r.picks else None, healthy=r.healthy, flat=len(r.picks),
+                dropped=r.dropped, scan_time=r.scan_time.isoformat())
     return 0
 
 

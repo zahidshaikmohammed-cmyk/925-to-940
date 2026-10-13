@@ -488,7 +488,10 @@ def run_self_test() -> int:
     return 0 if result.wasSuccessful() else 10
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, cfg_overrides: dict | None = None,
+         universe: set[str] | None = None, mode_note: str | None = None, rerun_hint: str = "bbbbb.py") -> int:
+    """``cfg_overrides`` replace StrategyConfig fields; ``universe`` keeps only those symbols
+    (fno.py uses both); ``mode_note`` is printed under the banner."""
     parser = argparse.ArgumentParser(description="PSYGRID any-time 990-stock scanner")
     parser.add_argument("--self-test", action="store_true", help="run offline tests and exit")
     parser.add_argument("--preflight-only", action="store_true", help="inspect the atomic 990-stock public endpoint and exit")
@@ -504,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return run_self_test()
 
-    cfg = StrategyConfig()
+    cfg = replace(StrategyConfig(), **(cfg_overrides or {}))
     if args.min_turnover is not None:
         cfg = replace(cfg, min_median_turnover_rupees=max(0.0, args.min_turnover))
     cfg.validate()
@@ -514,6 +517,9 @@ def main(argv: list[str] | None = None) -> int:
     sectors = load_sector_map()
 
     print_banner()
+    if mode_note:
+        print(mode_note)
+        print("=" * 96)
     now = now_ist()
     today = now.date()
     audit.event("ENGINE_START", base_url=args.base_url, mode="ANY_TIME_SCAN_INTRADAY_NO_PREVIOUS_CLOSE")
@@ -538,6 +544,11 @@ def main(argv: list[str] | None = None) -> int:
     # scoring one snapshot after preflighting a different snapshot.
     try:
         raw = client.market()
+        if universe is not None:
+            raw = {s: v for s, v in raw.items() if s in universe}
+            missing = sorted(universe - set(raw))
+            print(f"UNIVERSE FILTER: {len(raw)} of {len(universe)} listed symbols found in the feed"
+                  + (f" | not in feed: {', '.join(missing[:12])}{' ...' if len(missing) > 12 else ''}" if missing else ""))
     except Exception as exc:
         print(f"FATAL: no usable stock feed returned: {exc}")
         audit.event("FATAL_NO_USABLE_FEED", error=str(exc))
@@ -568,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     unhealthy = {s: d for s, d in parsed.items() if not d.health.healthy}
 
     print(f"SCAN TIME    : {scan_time:%Y-%m-%d %H:%M:%S.%f} IST")
-    print(f"UNIVERSE     : {len(parsed)}/{args.expected_universe} unique stocks received")
+    print(f"UNIVERSE     : {len(parsed)}/{len(universe) if universe is not None else args.expected_universe} unique stocks received")
     print(f"HEALTHY      : {len(healthy)}")
     print(f"SKIPPED      : {len(unhealthy)} stock(s) failed per-stock feed checks")
     print(f"SHARD ISSUES : {len(client.last_market_errors)}")
@@ -654,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
     global LAST_STATUS
     LAST_STATUS = status
     print(f"\nSTATUS: {status}")
-    print("MODE: ONE-SHOT INTRADAY SCAN — rerun bbbbb.py whenever you want a fresh #1")
+    print(f"MODE: ONE-SHOT INTRADAY SCAN — rerun {rerun_hint} whenever you want a fresh #1")
     print("NOTE: deterministic research signal; not a guarantee of profit.")
     audit.event(
         status,

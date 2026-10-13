@@ -263,7 +263,7 @@ def _emergency_candidate(
     if leg:
         idx, extreme, retrace, depth, reclaim, impulse_pct, impulse_atr, leg_start = leg
         setup_label = "RECENT_IMPULSE_RETRACEMENT_WEAK"
-        retracement_score = clamp(1.0 - abs(depth - 0.52) / 0.52)
+        retracement_score = clamp(1.0 - abs(depth - cfg.retracement_sweet_spot) / 0.52)
         retracement_level = retrace
     else:
         idx = -1
@@ -452,7 +452,7 @@ def _build_candidate(
         return None
 
     si = scale(impulse_pct, cfg.min_impulse_pct, 1.5)
-    sr = clamp(1.0 - abs(depth - 0.52) / 0.22)
+    sr = clamp(1.0 - abs(depth - cfg.retracement_sweet_spot) / 0.22)
     sm = scale(rs, 0.10, 0.80)
     ssr = scale(srs, 0.05, 0.60)
     sv = scale(1.0 - vol_ratio, 0.0, 0.50)

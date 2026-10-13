@@ -28,6 +28,8 @@ class StrategyConfig:
     min_retracement_bars: int = 3
     min_retracement_depth: float = 0.38
     max_retracement_depth: float = 0.70
+    # Depth the retracement score peaks at (it decays to 0 at ±0.22 for Tier 1/2).
+    retracement_sweet_spot: float = 0.52
     min_reclaim_ratio: float = 0.50
 
     # Hard anti-gap / anti-exhaustion rules for Tier 1/2.

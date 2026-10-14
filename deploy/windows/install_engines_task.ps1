@@ -34,13 +34,23 @@ $envFile = Join-Path $repo "telegram.env"
 "TELEGRAM_BOT_TOKEN=$token`nTELEGRAM_CHAT_ID=$chat" | Out-File -Encoding ascii -NoNewline $envFile
 Write-Host "Saved Telegram settings to $envFile (git-ignored)."
 
-# --- checks before installing
-& $python (Join-Path $repo "strategy_engines.py") --self-test *> $null
-if ($LASTEXITCODE -ne 0) { throw "strategy engine self-test failed -- not installing the task" }
+# --- checks before installing. Python writes test progress to stderr, which Windows PowerShell
+# 5.1 turns into a terminating error under "Stop", so native commands run under "Continue" and
+# are judged by their exit code only.
+$ErrorActionPreference = "Continue"
 Push-Location $repo
-& $python strategy_engines.py --telegram-test
+$selfTest = & $python strategy_engines.py --self-test 2>&1 | ForEach-Object { "$_" }
+$st = $LASTEXITCODE
+if ($st -ne 0) {
+    Pop-Location
+    $selfTest | Select-Object -Last 40 | Write-Host
+    throw "strategy engine self-test failed (exit $st) -- not installing the task. Send the lines above."
+}
+Write-Host "Self-test passed."
+& $python strategy_engines.py --telegram-test 2>&1 | ForEach-Object { "$_" } | Write-Host
 $tg = $LASTEXITCODE
 Pop-Location
+$ErrorActionPreference = "Stop"
 if ($tg -ne 0) { Write-Warning "Telegram test failed: check the token / chat id (the task is installed anyway)." }
 
 # --- the scheduled task

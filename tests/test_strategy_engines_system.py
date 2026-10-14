@@ -345,8 +345,13 @@ class UnattendedRun(unittest.TestCase):
     def test_credentials_file_is_git_ignored(self):
         self.assertIn("telegram.env", Path(".gitignore").read_text().split())
 
-    def test_keep_awake_is_a_no_op_off_windows(self):
-        self.assertFalse(se.keep_awake())
+    def test_keep_awake_only_acts_on_windows(self):
+        import sys
+        result = se.keep_awake()
+        if sys.platform == "win32":
+            self.assertIsInstance(result, bool)     # real SetThreadExecutionState call
+        else:
+            self.assertFalse(result)
 
 
 class History(unittest.TestCase):

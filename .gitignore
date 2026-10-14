@@ -8,3 +8,4 @@ index_levels.json
 index_state.json
 data/
 graded_signals.jsonl
+telegram.env

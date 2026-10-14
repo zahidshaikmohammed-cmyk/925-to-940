@@ -696,7 +696,18 @@ python strategy_engines.py --self-test
 - **Linux VM:** `deploy/systemd/psygrid-engines.{service,timer}`, Mon–Fri 09:05 IST, installed
   by `deploy/systemd/install.sh`. Put the Telegram variables in `/etc/psygrid-engines.env`
   (mode 0600).
-- **Windows:** `deploy/windows/install_engines_task.ps1`.
+- **Windows, fully unattended:** run `deploy/windows/install_engines_task.ps1` once in an
+  *administrator* PowerShell. It does the following:
+  - saves the Telegram token and chat id to the git-ignored `telegram.env`;
+  - registers the task `PSYGRID-Engines` for Mon–Fri at 09:05. The task runs whether or not
+    anyone is logged in (S4U), wakes the PC from sleep, retries 3 times and never runs twice at
+    once;
+  - enables wake timers on mains power.
+
+  Each morning `deploy/windows/run_engines.ps1` runs `git pull --ff-only` (on failure it keeps
+  the current code), then starts the engines and logs to `data\engines\logs\DAY.log`. The
+  engines keep Windows awake until 15:16 and send a "running" Telegram message at the start.
+  The PC must be on or asleep and plugged in; a shut-down PC cannot start itself.
 
 **Daily flow**
 1. Check the trading day against `run_engine.NSE_HOLIDAYS_2026`.

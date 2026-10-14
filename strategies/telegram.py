@@ -1,6 +1,7 @@
 """Telegram Bot API alerts (standard library only).
 
-Configuration (environment, never hard-coded or logged):
+Configuration (never hard-coded or logged), from the environment or, for unattended runs,
+from the git-ignored file telegram.env in the repository folder:
     TELEGRAM_BOT_TOKEN   the bot token from @BotFather
     TELEGRAM_CHAT_ID     the chat / channel id to post to
 
@@ -17,18 +18,41 @@ import time as systime
 import urllib.error
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 
 from strategy_930 import IST
 
 API = "https://api.telegram.org/bot{token}/{method}"
+# Fallback for unattended runs (a scheduled task may not see user environment variables):
+# KEY=VALUE lines in <repo>/telegram.env, which is git-ignored and never committed.
+CREDENTIALS_FILE = Path(__file__).resolve().parents[1] / "telegram.env"
+
+
+def load_credentials(path: Path = CREDENTIALS_FILE) -> tuple[str, str]:
+    """(token, chat_id) from the environment, else from ``telegram.env``; ("", "") if neither."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if token and chat:
+        return token, chat
+    try:
+        values = {}
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                values[k.strip()] = v.strip().strip('"').strip("'")
+        return token or values.get("TELEGRAM_BOT_TOKEN", ""), chat or values.get("TELEGRAM_CHAT_ID", "")
+    except OSError:
+        return token, chat
 
 
 class TelegramNotifier:
     def __init__(self, token: str | None = None, chat_id: str | None = None, transport=None,
                  sleep=systime.sleep, clock=systime.monotonic, min_interval: float = 1.1,
                  max_retries: int = 3, timeout: float = 10.0):
-        self.token = token if token is not None else os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id if chat_id is not None else os.environ.get("TELEGRAM_CHAT_ID", "")
+        if token is None or chat_id is None:
+            env_token, env_chat = load_credentials()
+        self.token = token if token is not None else env_token
+        self.chat_id = chat_id if chat_id is not None else env_chat
         self.transport = transport or self._post
         self.sleep, self.clock = sleep, clock
         self.min_interval, self.max_retries, self.timeout = min_interval, max_retries, timeout

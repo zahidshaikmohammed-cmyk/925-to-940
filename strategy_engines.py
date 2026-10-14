@@ -348,11 +348,31 @@ def daily_summary(st: DayState, send: bool = True) -> None:
     st.journal("DAILY_SUMMARY", summary=st.ledger.summary(), scans=st.scans, feed_failures=st.feed_failures)
 
 
+def keep_awake() -> bool:
+    """On Windows, stop the PC from sleeping while this process runs (released automatically
+    when it exits). Returns True when the request was made."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        return bool(ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED))
+    except Exception:
+        return False
+
+
 def run_day(st: DayState, client: PsygridClient, offset: int, send: bool = True,
             clock=now_ist, sleep=systime.sleep) -> int:
     print(f"DAILY RUN    : {st.day} | scans every minute {FIRST_SCAN:%H:%M}-{LAST_SCAN:%H:%M} IST "
           f"({offset}s past the minute) | engines {len(st.engines)} | telegram "
           f"{'ON' if st.notifier.enabled and send else 'OFF'}", flush=True)
+    awake = keep_awake()
+    st.journal("RUN_START", keep_awake=awake)
+    if send and st.notifier.enabled:
+        started = clock()
+        st.notifier.send(f"✅ <b>Strategy engines running</b> — {st.day} {started:%H:%M} IST\n"
+                         f"{len(st.engines)} engines, scans every minute until {LAST_SCAN:%H:%M}. "
+                         "You will get a message for every 90+ signal, any data-feed problem, and a summary at the close.")
     while True:
         now = clock()
         if now.time() > LAST_SCAN:

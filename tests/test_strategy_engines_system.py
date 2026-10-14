@@ -327,6 +327,28 @@ class Telegram(unittest.TestCase):
         self.assertIn("Silence does NOT mean no opportunity", format_feed_problem(sig.signal_time, "x"))
 
 
+class UnattendedRun(unittest.TestCase):
+    def test_credentials_file_used_when_no_environment(self):
+        import os
+        from unittest import mock
+        from strategies.telegram import load_credentials
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "telegram.env"
+            f.write_text('# comment\nTELEGRAM_BOT_TOKEN = "123:ABC"\nTELEGRAM_CHAT_ID=-1001\n', encoding="utf-8")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(load_credentials(f), ("123:ABC", "-1001"))
+            with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "9:Z", "TELEGRAM_CHAT_ID": "7"}, clear=True):
+                self.assertEqual(load_credentials(f), ("9:Z", "7"))           # environment wins
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(load_credentials(Path(d) / "missing.env"), ("", ""))
+
+    def test_credentials_file_is_git_ignored(self):
+        self.assertIn("telegram.env", Path(".gitignore").read_text().split())
+
+    def test_keep_awake_is_a_no_op_off_windows(self):
+        self.assertFalse(se.keep_awake())
+
+
 class History(unittest.TestCase):
     def test_previous_trading_day_skips_weekend_and_holiday(self):
         from run_engine import is_trading_day
@@ -423,6 +445,7 @@ class DailyRunner(unittest.TestCase):
         alerts = [m for m in sent if SWEEP in m and "TEST" in m and "score" in m]
         self.assertEqual(len(alerts), 1)                 # 10:01 scan alerts; later scans do not repeat it
         self.assertTrue(any("Strategy engines" in m for m in sent))      # daily summary
+        self.assertIn("Strategy engines running", sent[0])                # started message first
         self.assertTrue(archived)
         self.assertEqual(sum(1 for line in journal if "\"SCAN\"" in line), 5)   # start + 4 minutes
         rec = list(ledger["signals"].values())[0]

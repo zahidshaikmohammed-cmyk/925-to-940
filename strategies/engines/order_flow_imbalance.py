@@ -101,7 +101,7 @@ class OrderFlowImbalanceEngine(Engine):
         ]
         word = "buy" if sv.s == 1 else "sell"
         conds = (
-            f"BVC {word} imbalance OI10={oi:+.2f} (>=0.30), last-3 OI={oi3:+.2f}",
+            f"BVC {word} imbalance OI10={sv.s * oi:+.2f} (|OI|>=0.30), last-3 OI={sv.s * oi3:+.2f}",
             f"window volume {vr:.2f}x normal (>=1.5)",
             f"close {sv.real(c):.2f} broke the prior 20-bar {'high' if sv.s == 1 else 'low'} {sv.real(ref):.2f}",
             f"{'above' if sv.s == 1 else 'below'} VWAP {sv.real(vw):.2f} by {ext:.2f} ATR",

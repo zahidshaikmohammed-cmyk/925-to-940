@@ -109,6 +109,18 @@ def with_bar(bars, i, **changes):
     return tuple(b)
 
 
+class ShortAlertText(unittest.TestCase):
+    def test_short_conditions_show_real_signs_and_ordered_ranges(self):
+        import re
+        n = "Order_Flow_Imbalance_Engine"
+        sh = ev_of(scenario_report(n, mirrored=True), n).signal
+        self.assertRegex(sh.conditions[0], r"sell imbalance OI10=-0\.\d+")
+        n = "Volatility_Compression_Expansion_Engine"
+        txt = ev_of(scenario_report(n, mirrored=True), n).signal.conditions[0]
+        lo, hi = map(float, re.search(r"box ([\d.]+)-([\d.]+)", txt).groups())
+        self.assertLess(lo, hi)
+
+
 class OrderFlow(unittest.TestCase):
     N = "Order_Flow_Imbalance_Engine"
 

@@ -118,7 +118,7 @@ class VolatilityCompressionExpansionEngine(Engine):
             Component("vwap_side", 0.10, ramp(vside, -0.5, 0.5), vside, "(C_t - VWAP)/ATR in direction, -0.5->0, 0.5->1"),
         ]
         conds = (
-            f"15-bar box {sv.real(lo):.2f}-{sv.real(hi):.2f} ({sv.ts[b0]:%H:%M}-{sv.ts[b1 - 1]:%H:%M}), "
+            f"15-bar box {min(sv.real(lo), sv.real(hi)):.2f}-{max(sv.real(lo), sv.real(hi)):.2f} ({sv.ts[b0]:%H:%M}-{sv.ts[b1 - 1]:%H:%M}), "
             f"Parkinson vol {cr:.2f}x the session baseline (<=0.60)",
             f"expansion {sv.ts[e]:%H:%M}: range {trr:.1f}x, volume {vr:.1f}x, body {body:.0%}",
             f"confirmed by the {sv.ts[t]:%H:%M} close {sv.real(sv.c[t]):.2f} holding outside",

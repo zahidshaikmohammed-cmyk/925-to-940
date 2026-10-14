@@ -1,0 +1,36 @@
+# PSYGRID ten strategy engines -- one trading day per start. Read-only consumer of the PSYGRID
+# feed: opens NO listening port, writes only its own data directory (journals, ledger, session
+# archive) and sends Telegram alerts. CPU / memory / I/O capped like psygrid-945.
+[Unit]
+Description=PSYGRID ten strategy engines: minute scans 09:16-15:16 IST, Telegram alerts for 90+ signals
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=psygrid945
+Group=psygrid945
+WorkingDirectory=/opt/psygrid-945
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+# TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (mode 0600, owned by root):
+EnvironmentFile=-/etc/psygrid-engines.env
+# Same host as PSYGRID -> loopback, never the public interface.
+ExecStart=/usr/bin/python3 /opt/psygrid-945/strategy_engines.py --base-url http://127.0.0.1:10000 --expected-universe 989 --data-dir /var/lib/psygrid-945
+# 20 = not a trading day, 23 = session already over: retrying cannot help.
+RestartPreventExitStatus=20 23
+Restart=on-failure
+RestartSec=60
+Nice=10
+CPUQuota=50%
+MemoryMax=768M
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/psygrid-945
+StateDirectory=psygrid-945
+
+[Install]
+WantedBy=multi-user.target

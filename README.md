@@ -1,5 +1,15 @@
 # 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 
+> **Ten strategy engines:** `python strategy_engines.py` runs ten independent, research-documented
+> intraday engines (order-flow imbalance, liquidity sweep, failed breakout, trend pullback,
+> relative strength, volatility compression, regime-filtered ORB, VWAP reclaim, exhaustion
+> reversal, structural break-and-retest) over all 989 stocks every minute 09:16-15:16 IST and
+> sends a Telegram alert (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) for any signal scoring 90+.
+> A 90+ score means all of a strategy's conditions are met at high quality, not a win probability;
+> no engine has yet been validated on NSE data. Mathematics, evidence grades, score definitions,
+> limitations and validation: [docs/STRATEGY_ENGINES.md](docs/STRATEGY_ENGINES.md). Daily
+> automation: `deploy/systemd/psygrid-engines.*` or `deploy/windows/install_engines_task.ps1`.
+
 > **945 continuous scan:** `python 945.py` now rescans every stock once a minute from 09:30
 > and beeps only on a confirmed Tier 1 setup that still pays after costs. It tracks the
 > trade, keeps a journal in `data/scan/`, and can replay saved sessions with

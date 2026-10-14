@@ -31,7 +31,11 @@ jobs:
           python opt.py --self-test
           python bbbbb_plus.py --self-test
           python 945.py --self-test
+          python strategy_engines.py --self-test
+          python strategy_engines.py --list
       - name: 945 production-scale benchmark (989 stocks, integrated path)
         run: python 945.py --benchmark
       - name: Verify systemd units
-        run: systemd-analyze verify deploy/systemd/psygrid-945.timer deploy/systemd/psygrid-945.service
+        run: |
+          systemd-analyze verify deploy/systemd/psygrid-945.timer deploy/systemd/psygrid-945.service
+          systemd-analyze verify deploy/systemd/psygrid-engines.timer deploy/systemd/psygrid-engines.service

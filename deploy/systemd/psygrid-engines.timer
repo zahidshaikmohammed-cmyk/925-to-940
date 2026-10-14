@@ -1,0 +1,12 @@
+[Unit]
+Description=Start the ten PSYGRID strategy engines every weekday before the 09:15 open
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:05:00 Asia/Kolkata
+# If the VM was down at 09:05, start as soon as it is up (a restart resumes the day's ledger,
+# so signals already alerted are never re-sent).
+Persistent=true
+Unit=psygrid-engines.service
+
+[Install]
+WantedBy=timers.target

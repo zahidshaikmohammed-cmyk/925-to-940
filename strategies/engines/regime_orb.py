@@ -20,7 +20,7 @@ Definitions (LONG; SHORT mirrored):
   Direction: OR_close > OR_open (opening drive agrees).
   Trigger: t is the FIRST bar after 09:29 with C_t > ORH, and no close below ORL before t.
   Regime: market return since open >= 0 and breadth above VWAP >= 0.50 (LONG).
-  Window: decision bars 09:30-10:59.
+  Window: decision bars 09:30-09:59.
 Trade: stop-entry above H_t; stop = ORL (the literature's opposite-side stop); target 2R;
   time exit 15:15 (Zarattini et al. hold to the close).
 """
@@ -37,7 +37,7 @@ class RegimeFilteredORBEngine(Engine):
     NAME = "Regime_Filtered_ORB_Engine"
     TITLE = "Regime-Filtered Opening-Range Breakout"
     EARLIEST = time(9, 30)
-    LATEST = time(10, 59)
+    LATEST = time(9, 59)                  # the earliness score caps anything later below 90
     MIN_BARS = OR_BARS + 1
     NEEDS_MARKET = True
     COOLDOWN_MINUTES = 24 * 60            # one ORB per stock and side per day

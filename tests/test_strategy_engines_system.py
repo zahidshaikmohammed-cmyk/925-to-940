@@ -152,10 +152,16 @@ class Ledger(unittest.TestCase):
         rec = led.records[self.sig.key]
         rec["state"] = "STOPPED"
         self.assertEqual(led.decide(later)[1], "within_cooldown")
-        much_later = replace(later, signal_time=self.sig.signal_time + timedelta(minutes=16))
+        after_cooldown = replace(later, signal_time=self.sig.signal_time + timedelta(minutes=16))
+        self.assertTrue(led.decide(after_cooldown)[1].startswith("symbol_alerted_recently"))  # 30-min gap
+        much_later = replace(later, signal_time=self.sig.signal_time + timedelta(minutes=31))
         self.assertEqual(led.decide(much_later), (True, "new"))
         other_side = replace(later, direction="SHORT")
-        self.assertEqual(led.decide(other_side), (True, "new"))
+        self.assertEqual(led.decide(other_side)[1], "opposite_direction_alerted_recently")
+        other_engine = replace(later, engine="VWAP_Reclaim_Rejection_Engine")
+        self.assertTrue(led.decide(other_engine)[1].startswith("symbol_alerted_recently"))
+        other_stock = replace(later, symbol="OTHER")
+        self.assertEqual(led.decide(other_stock), (True, "new"))
 
     def _bars(self, *ohlc, start=None):
         start = start or self.sig.signal_time
@@ -174,6 +180,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(self._life((mid, mid, s - 0.01, mid))["state"], "INVALIDATED")
         r = self._life((mid, e + 0.01, mid, e), (e, t + 0.01, e, t))
         self.assertEqual((r["state"], r["r_multiple"]), ("TARGET", round((t - e) / (e - s), 3)))
+        self.assertAlmostEqual(r["r_net"], r["r_multiple"] - self.sig.cost_r, places=3)
         r = self._life((mid, e + 0.01, mid, e), (e, e, s - 0.01, s))
         self.assertEqual((r["state"], r["r_multiple"]), ("STOPPED", -1.0))
         r = self._life((mid, e + 0.01, s - 0.01, mid))            # both in one bar: stop assumed
@@ -207,6 +214,53 @@ class Ledger(unittest.TestCase):
             self.assertEqual(fresh.records, {})
             self.assertTrue((Path(d) / "ledger.corrupt").exists())
             self.assertIn("LEDGER-WARN", out.getvalue())
+
+
+class GovernorRules(unittest.TestCase):
+    def state(self):
+        rep, _, _ = sweep_report()
+        sig = [x for x in rep.signals if x.engine == SWEEP][0]
+        st = se.new_day_state(fx.DAY.date(), Path(tempfile.mkdtemp()), [], TelegramNotifier("", ""), persist=False)
+        return st, sig
+
+    def closed(self, st, sig, i, r_net, minute):
+        rec = st.ledger.record(replace(sig, symbol=f"S{i}", anchor=f"a{i}"))
+        rec.update(state="STOPPED" if r_net < 0 else "TARGET", r_multiple=r_net, r_net=r_net,
+                   state_time=(sig.signal_time + timedelta(minutes=minute)).isoformat())
+
+    def test_daily_loss_limit_and_losing_streak(self):
+        st, sig = self.state()
+        self.assertIsNone(se.governor_block(st, LONG, 0))
+        self.closed(st, sig, 1, -1.1, 1)
+        self.closed(st, sig, 2, -1.1, 2)
+        self.assertIsNone(se.governor_block(st, LONG, 0))
+        self.closed(st, sig, 3, +2.0, 3)
+        self.closed(st, sig, 4, -1.1, 4)
+        self.assertIsNone(se.governor_block(st, LONG, 0))     # streak broken by the winner, -1.3R total
+        self.closed(st, sig, 5, -1.1, 5)
+        self.closed(st, sig, 6, -1.1, 6)
+        self.assertIn("daily_loss_limit", se.governor_block(st, LONG, 0))   # -3.5R
+
+    def test_streak_and_caps(self):
+        st, sig = self.state()
+        for i in range(3):
+            self.closed(st, sig, i, -0.5, i)
+        self.assertEqual(se.governor_block(st, LONG, 0), "losing_streak_3")
+        st, sig = self.state()
+        self.assertEqual(se.governor_block(st, LONG, 2), "max_new_alerts_this_minute")
+        for i in range(3):
+            st.ledger.record(replace(sig, symbol=f"O{i}", anchor=f"o{i}"))
+        self.assertEqual(se.governor_block(st, LONG, 0), "max_open_long_trades")
+        self.assertIsNone(se.governor_block(st, "SHORT", 0))
+
+    def test_handle_report_caps_alerts_per_minute_highest_score_first(self):
+        st, sig = self.state()
+        rep, _, _ = sweep_report()
+        many = [replace(sig, symbol=f"M{i}", anchor=f"m{i}", score=90 + i) for i in range(5)]
+        rep.signals = many
+        with contextlib.redirect_stdout(io.StringIO()):
+            new = se.handle_report(st, rep, sig.signal_time, send=False)
+        self.assertEqual([r["symbol"] for r in new], ["M4", "M3"])
 
 
 class FakeTransport:

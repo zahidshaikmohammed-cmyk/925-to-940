@@ -147,10 +147,45 @@ fitting them to the same days you then evaluate would be curve fitting.
   - Risk must be between 0.15% and 2.0% of entry.
   - Round-trip cost must be at most 0.25R.
   - Costs use `edge/costs.py` on ₹1 lakh with 2 bps slippage per side, which is 0.122% round
-    trip. The slippage is an assumption, because there are no quotes.
+    trip. Stocks with median turnover below ₹10 lakh per minute are costed at 5 bps per side.
+    The slippage is an assumption, because there are no quotes.
   - In effect the stop must be at least about 0.49% away.
   - An explicit target must still pay at least 1.5R.
-- **Time stop.** 15:15. No new signal starts after the 14:44 decision bar.
+- **Time stop.** 15:15. No new signal starts after the 14:15 decision bar.
+
+## 6a. Loss-avoidance safety gates (added after the first live session)
+
+These gates came from the first live alerts on 2026-10-14 and an independent code review:
+- **AARTIPHARM:** an Order-Flow LONG on a stock down 2.7% on the day.
+- **ASTERDM:** a Compression SHORT whose risk was 90% chase.
+
+They apply to every engine, in `core.Engine._evaluate`, after the strategy's own gates.
+Every threshold is a judgment call, not a tested value. `s` is +1 for LONG and −1 for SHORT;
+`day` = C/previous close − 1; `from_open` = C/09:15 open − 1; `market` is the universe median
+change vs previous close.
+
+| Gate | Rule | Engines |
+|---|---|---|
+| With the day | reject `s·day < −1%` unless `s·from_open ≥ +1%` (a real reversal from the open) | trend engines |
+| With the market | reject `s·market < −0.5%` or `s·(breadth − 0.5) < −0.20` | trend engines |
+| News / circuit | reject `|day| ≥ 8%` | trend engines |
+| Fade limits | reject `|day| ≥ 4%` or `s·market < −0.5%` | fade engines (sweep, failed breakout, exhaustion) |
+| Reachable target | reject if `|target − entry| > ATR·sqrt(M)`, where M is the minutes from the entry deadline to 15:15 | all |
+| Last entry | no decision bar after 14:15 (ORB: 09:59, when its earliness score stops allowing 90+) | all |
+| Thin stocks | 5 bps slippage below ₹10 lakh per minute median turnover | all |
+| Lunch volume | every "× normal volume" baseline is at least 0.6 × the median volume since 09:30 | all |
+| No chase | compression: expansion range ≤ 8× box TR, and entry ≤ 0.6R beyond the box edge | compression |
+| Beat the market | order flow: the 10-bar window return minus the market's ≥ +0.3% | order flow |
+
+Every alert now carries a context line, for example `context: day −2.70% vs prev close,
++0.40% vs open, market +0.35%, breadth 61%`. Fade alerts are labelled `counter-trend setup by
+design`.
+
+**Bug fixes from the same review:**
+- The failed-breakout engine's session-low/high level was always skipped (dead code). It is
+  now used.
+- ORB's window was documented as running to 10:59, but its score could not reach 90 after
+  about 10:00. The window is now 09:30–09:59.
 
 ## 6. The ten engines
 
@@ -174,7 +209,7 @@ sign from price, so it is not independent of price. The independent information 
 that weights it. For that reason the confirmation uses a different price feature (a break of the
 range before the window) from the one the classifier uses.
 
-**Inputs:** at least 41 bars. Decision bars run 09:55–14:44.
+**Inputs:** at least 41 bars. Decision bars run 09:55–14:15.
 
 **Definitions**
 - `σ` = sample s.d. of `ΔC` over the 30 bars *before* the 10-bar window (causal).
@@ -261,7 +296,7 @@ break gate mostly blocks it.
 - **[H]** A low-volume, partial retracement inside a stock-level trend resolves in the trend's
   direction.
 
-**Inputs:** at least 61 bars and the market context. Decision bars run 10:15–14:44.
+**Inputs:** at least 61 bars and the market context. Decision bars run 10:15–14:15.
 
 **Gates (LONG):**
 - **Trend:**
@@ -310,7 +345,7 @@ break gate mostly blocks it.
 - The stock's own return is positive.
 - `C_t > VWAP` and `z = (C_t − VWAP)/sd ≤ 3.0`. A perfectly linear trend sits at `z = √3 ≈ 1.73`,
   so q is full up to 1.75.
-- A fresh 15-bar high. Decision bars run 10:15–14:30.
+- A fresh 15-bar high. Decision bars run 10:15–14:15.
 
 **Stop:** min L of the last 15 bars − 0.10 ATR.
 
@@ -370,7 +405,7 @@ which requires a flat day relative to the previous close.
 - The OR close is above the OR open.
 - `t` is the first close beyond ORH, and the opposite side has not been broken first.
 - `ret_open ≥ 0` and breadth ≥ 0.5.
-- Decision bars run 09:30–10:59.
+- Decision bars run 09:30–09:59.
 
 **Stop:** ORL, the literature's opposite-side stop. **Target:** 2R. **Time exit:** 15:15.
 
@@ -593,7 +628,7 @@ Textbook test scenario: score 100.00, entry 101.71, stop 100.96, target 103.21
 
 ## 7. Duplicates, lifecycle and Telegram
 
-**What makes a signal new.** It must pass all three checks:
+**What makes a signal new.** It must pass all four checks:
 1. The key `engine|symbol|direction|anchor` has not been seen today. The anchor is the
    engine-defined identity of the setup: the swept level and sweep bar, the break bar, the ORB
    date, and so on.
@@ -601,8 +636,18 @@ Textbook test scenario: score 100.00, entry 101.71, stop 100.96, target 103.21
    continuing condition is not a new signal.
 3. The engine's cooldown has passed: 15 minutes for the sweep engine, 60 for RS, one day for
    ORB, 30 for the others.
+4. No engine has alerted the same stock in the last 30 minutes. An opposite-direction alert
+   inside that window is a conflict and is suppressed.
 
-Different engines are independent and may alert on the same stock. The ledger
+**Daily risk limits** (`strategy_engines.Governor`). These are judgment values. Signals are
+taken highest score first.
+- At most 2 new alerts per minute.
+- At most 3 open (`PENDING` or `TRIGGERED`) trades in one direction.
+- Alerts stop for the day once realised net R ≤ −3, or after 3 losing trades in a row. One
+  Telegram notice says so.
+
+Closed trades record `r_multiple` (gross, at modelled prices) and `r_net`
+(`r_multiple − cost_r`). Summaries and replays report the net figure. The ledger
 (`data/engines/DAY/ledger.json`) is written atomically and survives restarts. A corrupt ledger
 is moved aside, with a warning.
 

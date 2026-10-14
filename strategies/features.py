@@ -15,6 +15,8 @@ from strategy_930 import Candle
 from . import indicators as ind
 
 ATR_BARS = 14
+OR_END_INDEX = 15        # bar 15 = 09:30, the first bar after the opening range
+LUNCH_FLOOR = 0.6
 SESSION_OPEN = time(9, 15)
 
 
@@ -40,7 +42,7 @@ class StockView:
 
 
 class Features:
-    __slots__ = ("o", "h", "l", "c", "v", "ts", "tr", "atr", "vwap", "vwap_sd", "n", "_sides")
+    __slots__ = ("o", "h", "l", "c", "v", "ts", "tr", "atr", "vwap", "vwap_sd", "n", "_sides", "_floor")
 
     def __init__(self, bars: tuple[Candle, ...]):
         self.ts = tuple(b.ts for b in bars)
@@ -54,6 +56,7 @@ class Features:
         self.atr = ind.rolling_mean(self.tr, ATR_BARS)
         self.vwap, self.vwap_sd = ind.vwap_series(self.h, self.l, self.c, self.v)
         self._sides = {}
+        self._floor = {}
 
     def side(self, s: int) -> "Side":
         """The cached direction-normalised view (+1 LONG, -1 SHORT)."""
@@ -67,9 +70,20 @@ class Features:
         return self.n - 1
 
     def med_volume(self, end: int, n: int) -> float | None:
-        """Median volume of the n bars before index ``end`` (exclusive)."""
+        """Baseline volume for "x times normal" tests, from bars before index ``end`` only:
+        max(median of the n bars before ``end``, LUNCH_FLOOR x median volume since 09:30).
+
+        The floor stops a quiet stretch (lunch) from making ordinary volume look like a
+        2-3x surge. It needs >= 30 bars since 09:30; before that the local median is used."""
         lo = max(0, end - n)
-        return median(self.v[lo:end]) if end > lo else None
+        if end <= lo:
+            return None
+        local = median(self.v[lo:end])
+        if end - OR_END_INDEX >= 30:
+            if end not in self._floor:
+                self._floor[end] = LUNCH_FLOOR * median(self.v[OR_END_INDEX:end])
+            return max(local, self._floor[end])
+        return local
 
     def fingerprint(self) -> int:
         return hash((self.ts, self.o, self.h, self.l, self.c, self.v, self.tr, self.atr, self.vwap, self.vwap_sd))

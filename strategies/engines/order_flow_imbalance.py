@@ -22,7 +22,8 @@ Definitions (LONG; SHORT is the mirror image via features.Side):
   VR   = sum_{window} V / (W * median V of the 30 bars before the window)
   REF  = max High of the 20 bars before the window
 Mandatory gates: OI_W >= 0.30; OI_3 >= 0.20; VR >= 1.5; C_t > REF; C_t > VWAP_t;
-  C_t > C_{t-10} (net price change agrees with flow); CLV_t >= 0; (C_t - VWAP_t)/ATR <= 3.
+  C_t > C_{t-10} (net price change agrees with flow); CLV_t >= 0; (C_t - VWAP_t)/ATR <= 3;
+  window return minus the market's window return >= +0.3% (otherwise it is just beta).
 Trade: stop-entry above H_t; stop = min Low of last 5 bars - 0.10 ATR; target 2R.
 """
 from __future__ import annotations
@@ -40,6 +41,8 @@ class OrderFlowImbalanceEngine(Engine):
     W, FAST, SIGMA_BARS, REF_BARS = 10, 3, 30, 20
     MIN_BARS = W + SIGMA_BARS + 1
     OI_MIN, OI_FAST_MIN, VR_MIN, MAX_EXT_ATR = 0.30, 0.20, 1.5, 3.0
+    MIN_EXCESS = 0.003           # the window move must beat the market's by >= 0.3%
+    NEEDS_MARKET = True
     COOLDOWN_MINUTES = 30
 
     def side(self, stock, sv, ctx):
@@ -87,6 +90,13 @@ class OrderFlowImbalanceEngine(Engine):
             return no(f"weak_close_clv_{clv:+.2f}")
         if ext > self.MAX_EXT_ATR:
             return no(f"extended_{ext:.2f}ATR_from_vwap")
+        m = ctx.market_return_between(sv.ts[w0 - 1], sv.ts[t])
+        if m is None:
+            return lacking("market_minutes_missing_for_window")
+        f = sv.base
+        excess = sv.s * ((f.c[t] / f.c[w0 - 1] - 1.0) - m)
+        if excess < self.MIN_EXCESS:
+            return no(f"just_the_market_excess_{excess:+.2%}")
         persistence = sum(1 for x in signed if x > 0) / self.W
         er = ind.efficiency_ratio(sv.c[w0 - 1:t + 1])
         clear = (c - ref) / atr
@@ -102,7 +112,7 @@ class OrderFlowImbalanceEngine(Engine):
         word = "buy" if sv.s == 1 else "sell"
         conds = (
             f"BVC {word} imbalance OI10={sv.s * oi:+.2f} (|OI|>=0.30), last-3 OI={sv.s * oi3:+.2f}",
-            f"window volume {vr:.2f}x normal (>=1.5)",
+            f"window volume {vr:.2f}x normal (>=1.5); beat the market by {excess:+.2%} in the window",
             f"close {sv.real(c):.2f} broke the prior 20-bar {'high' if sv.s == 1 else 'low'} {sv.real(ref):.2f}",
             f"{'above' if sv.s == 1 else 'below'} VWAP {sv.real(vw):.2f} by {ext:.2f} ATR",
             "proxy: OHLCV bulk-volume classification, not quote-level OFI",

@@ -67,7 +67,6 @@ class RelativeStrengthWeaknessEngine(Engine):
     NAME = "Relative_Strength_Weakness_Engine"
     TITLE = "Relative-Strength Leader / Relative-Weakness Laggard"
     EARLIEST = time(10, 15)
-    LATEST = time(14, 30)
     MIN_BARS = 61
     NEEDS_MARKET = True
     COOLDOWN_MINUTES = 60

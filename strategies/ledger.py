@@ -6,8 +6,10 @@ A signal is NEW (alert-worthy) only if all hold:
   2. no earlier signal of the same engine, symbol and direction is still ACTIVE (PENDING
      entry or TRIGGERED trade) -- a continuing condition is not a new signal;
   3. the last signal of that engine, symbol and direction is older than the engine's
-     COOLDOWN_MINUTES.
-Different engines are independent: two engines may legitimately signal the same stock.
+     COOLDOWN_MINUTES;
+  4. no engine alerted the same stock in the last 30 minutes (one alert per stock; an
+     opposite-direction alert inside that window is a conflict and is suppressed).
+Closed trades carry r_multiple (gross, at modelled prices) and r_net = r_multiple - cost_r.
 
 Lifecycle (evaluated only on bars that START at or after the signal time; for a stop-entry,
 LONG shown, SHORT mirrored; where one bar touches both levels the stop is assumed first):
@@ -29,6 +31,7 @@ from strategy_930 import IST
 from .core import LONG, Signal
 
 ACTIVE = ("PENDING", "TRIGGERED")
+SYMBOL_GAP = timedelta(minutes=30)
 SQUARE_OFF = time(15, 15)
 
 
@@ -62,7 +65,34 @@ class SignalLedger:
         for r in same:
             if sig.signal_time - datetime.fromisoformat(r["signal_time"]) < cd:
                 return False, "within_cooldown"
+        # across engines: one alert per stock per SYMBOL_GAP, never a flip inside it
+        for r in self.records.values():
+            if r["symbol"] != sig.symbol:
+                continue
+            if sig.signal_time - datetime.fromisoformat(r["signal_time"]) < SYMBOL_GAP:
+                if r["direction"] != sig.direction:
+                    return False, "opposite_direction_alerted_recently"
+                return False, "symbol_alerted_recently_by_" + r["engine"]
         return True, "new"
+
+    # --------------------------------------------------------------- governor
+    def open_count(self, direction: str) -> int:
+        return sum(1 for r in self.records.values() if r["state"] in ACTIVE and r["direction"] == direction)
+
+    def closed(self) -> list[dict]:
+        done = [r for r in self.records.values() if r.get("r_net") is not None]
+        return sorted(done, key=lambda r: (r["state_time"], r["key"]))
+
+    def realised_r(self) -> float:
+        return round(sum(r["r_net"] for r in self.closed()), 3)
+
+    def losing_streak(self) -> int:
+        n = 0
+        for r in reversed(self.closed()):
+            if r["r_net"] >= 0:
+                break
+            n += 1
+        return n
 
     def record(self, sig: Signal) -> dict:
         rec = {
@@ -72,7 +102,7 @@ class SignalLedger:
             "bar_time": _iso(sig.bar_time), "signal_time": _iso(sig.signal_time),
             "valid_until": _iso(sig.valid_until), "anchor": sig.anchor, "conditions": list(sig.conditions),
             "components": [asdict(c) for c in sig.components],
-            "state": "PENDING", "state_time": None, "exit_price": None, "r_multiple": None,
+            "state": "PENDING", "state_time": None, "exit_price": None, "r_multiple": None, "r_net": None,
             "last_bar": None, "telegram": {"sent": False, "attempts": 0, "error": None, "message_id": None},
         }
         self.records[sig.key] = rec
@@ -116,6 +146,8 @@ class SignalLedger:
             if state in ("STOPPED", "TARGET", "TIME_EXIT"):
                 fill = rec.get("fill", entry)
                 rec["r_multiple"] = round(((price - fill) if long else (fill - price)) / risk, 3)
+                # net of the modelled round-trip cost (fees + slippage), already expressed in R
+                rec["r_net"] = round(rec["r_multiple"] - rec.get("cost_r", 0.0), 3)
 
         if rec["state"] == "PENDING":
             if b.ts >= datetime.fromisoformat(rec["valid_until"]):
@@ -155,6 +187,6 @@ class SignalLedger:
             e = out.setdefault(r["engine"], {"signals": 0, "states": {}, "r": []})
             e["signals"] += 1
             e["states"][r["state"]] = e["states"].get(r["state"], 0) + 1
-            if r["r_multiple"] is not None:
-                e["r"].append(r["r_multiple"])
+            if r.get("r_net") is not None:
+                e["r"].append(r["r_net"])
         return out

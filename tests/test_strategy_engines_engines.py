@@ -97,9 +97,9 @@ class EveryEngine(unittest.TestCase):
                 self.assertEqual(fired, [name])
 
 
-def single(name, bars, pc=100.0, prior=None, n_filler=150, drift=0.0002):
+def single(name, bars, pc=100.0, prior=None, n_filler=150, drift=0.0002, today_open=None):
     u = fx.filler_universe(n_filler, len(bars), drift=drift)
-    u[SYM] = StockInput(SYM, tuple(bars), pc, bars[0].open)
+    u[SYM] = StockInput(SYM, tuple(bars), pc, today_open or bars[0].open)
     return ev_of(scan(u, {SYM: prior} if prior else {}, fx.scan_after(len(bars)), [name]), name)
 
 
@@ -193,6 +193,23 @@ class FailedBreakout(unittest.TestCase):
         bars[-2] = replace(bars[-2], open=99.55, high=99.6)          # then a single close below again
         ev = single(self.N, tuple(bars))
         self.assertEqual(ev.status, NO_SETUP, ev.reason)
+
+
+class FailedBreakoutDayLevel(unittest.TestCase):
+    def test_session_low_level_is_used(self):
+        # regression: the DL level used to be created with since=b and was always skipped
+        t = fx.Tape(100.0)
+        t.flat(15, 100.0, amp=0.1, v=30_000, wick=0.15)
+        t.flat(5, 99.6, amp=0.1, v=20_000, wick=0.1)
+        t.bar(99.3, v=20_000, up=0.05, l=99.0)               # day low 99.00 (below the ORL)
+        t.flat(15, 99.6, amp=0.12, v=20_000, wick=0.12)
+        t.bar(98.88, v=16_000, up=0.05, dn=0.05)
+        t.bar(98.85, v=15_000, up=0.05, dn=0.10)
+        t.bar(98.87, v=15_000, up=0.05, dn=0.05)
+        t.bar(99.35, v=45_000, up=0.02, dn=0.03)
+        ev = single("Failed_Breakout_Breakdown_Engine", t.done(), pc=99.6)
+        self.assertEqual(ev.status, SIGNAL, ev.reason)
+        self.assertTrue(ev.signal.anchor.startswith("DL@99.00"))
 
 
 class TrendPullback(unittest.TestCase):
@@ -317,7 +334,7 @@ class VWAPReclaim(unittest.TestCase):
         bars = bars_of(self.N)
         f = Features(bars)
         bad = with_bar(bars, -3, close=f.vwap[-3] - 0.3, low=f.vwap[-3] - 0.35)
-        self.assertEqual(single(self.N, bad, 103.0).status, NO_SETUP)
+        self.assertEqual(single(self.N, bad, 101.0).status, NO_SETUP)
 
 
 class Exhaustion(unittest.TestCase):
@@ -357,6 +374,85 @@ class Structural(unittest.TestCase):
         bars, pc, prior = fx.sc_structural()
         bad = with_bar(bars, -2, close=100.85, low=100.8, open=101.55, high=101.6)
         self.assertEqual(single(self.N, bad, pc, prior).status, NO_SETUP)
+
+
+class SafetyGates(unittest.TestCase):
+    OFI = "Order_Flow_Imbalance_Engine"
+
+    def test_aartipharm_pattern_long_on_a_red_day_is_blocked(self):
+        bars, _, _ = fx.sc_order_flow()              # LONG burst; open 102, now ~101.1
+        ev = single(self.OFI, bars, pc=103.2)        # -2.0% vs previous close, -0.9% vs open
+        self.assertEqual(ev.status, NO_SETUP)
+        self.assertIn("against_the_day", ev.reason)
+
+    def test_genuine_reversal_from_the_open_is_allowed(self):
+        bars, _, _ = fx.sc_order_flow()
+        ev = single(self.OFI, bars, pc=103.2, today_open=99.9)   # red on the day but +1.2% from open
+        self.assertEqual(ev.status, SIGNAL, ev.reason)
+
+    def test_against_the_market_is_blocked(self):
+        bars, _, _ = fx.sc_order_flow()
+        ev = single(self.OFI, bars, drift=-0.0004)
+        self.assertIn("against_the_market", ev.reason)
+
+    def test_news_or_circuit_move_is_blocked(self):
+        bars, _, _ = fx.sc_order_flow()
+        self.assertIn("news_or_circuit_risk", single(self.OFI, bars, pc=92.0).reason)
+
+    def test_signal_shows_day_and_market_context(self):
+        sig = ev_of(scenario_report(self.OFI), self.OFI).signal
+        self.assertTrue(any(c.startswith("context: day") for c in sig.conditions))
+
+    def test_fades_blocked_on_big_moves_and_labelled(self):
+        n = "Exhaustion_Mean_Reversion_Engine"
+        bars, _, _ = fx.sc_exhaustion()
+        self.assertIn("fade_blocked_day_move", single(n, bars, pc=102.0).reason)      # -5.3% day
+        sig = ev_of(scenario_report(n), n).signal
+        self.assertIn("counter-trend setup by design", sig.conditions[-1])
+
+    def test_compression_rejects_shock_candles_and_chasing(self):
+        n = "Volatility_Compression_Expansion_Engine"
+        bars = list(fx.sc_compression()[0])
+        e = bars[-2]
+        shock = list(bars)
+        shock[-2] = replace(e, high=e.high + 3.0, close=e.high + 2.9)
+        shock[-1] = replace(bars[-1], open=e.high + 2.9, high=e.high + 3.0, low=e.high + 2.8, close=e.high + 2.95)
+        self.assertIn("shock_candle", single(n, tuple(shock)).reason)
+        chase = list(bars)
+        c = bars[-1]
+        chase[-1] = replace(c, high=c.high + 0.6, close=c.high + 0.55)
+        self.assertIn("chasing", single(n, tuple(chase)).reason)
+
+    def test_unreachable_target_late_in_the_day(self):
+        from strategies.core import Trade
+        eng = build_engines([self.OFI])[0]
+        bars = tuple(Candle(fx.ts(i), 100, 100.05, 99.95, 100, 1000) for i in range(296))  # last 14:10
+        f = Features(bars)
+        self.assertAlmostEqual(f.atr[-1], 0.1)
+        trade = lambda move: Trade(LONG, 100.0, 100.0 - move / 2, 100.0 + move, move / 2, 0.5, 2.0, 0.2)
+        # deadline 14:14 -> 61 minutes to 15:15 -> reach = 0.1 * sqrt(61) = 0.78
+        self.assertIsNone(eng.reachable(trade(0.7), f, bars[-1].ts))
+        self.assertIn("target_unreachable", eng.reachable(trade(1.0), f, bars[-1].ts))
+
+    def test_no_new_entries_after_1415_and_orb_window(self):
+        for c in ENGINE_CLASSES:
+            self.assertLessEqual(c.LATEST, __import__("datetime").time(14, 15))
+        from strategies.engines.regime_orb import RegimeFilteredORBEngine
+        self.assertEqual(RegimeFilteredORBEngine.LATEST.strftime("%H:%M"), "09:59")
+
+    def test_thin_stocks_get_adverse_slippage(self):
+        eng = build_engines([self.OFI])[0]
+        thin = Features(tuple(Candle(fx.ts(i), 100, 100.1, 99.9, 100, 5_000) for i in range(40)))   # 5 lakh/min
+        deep = Features(tuple(Candle(fx.ts(i), 100, 100.1, 99.9, 100, 50_000) for i in range(40)))  # 50 lakh/min
+        self.assertEqual(eng.risk_for(thin).cost_slippage_bps, 5.0)
+        self.assertEqual(eng.risk_for(deep).cost_slippage_bps, 2.0)
+
+    def test_lunch_volume_floor(self):
+        vols = [100_000] * 90 + [10_000] * 40          # busy morning, dead lunch
+        f = Features(tuple(Candle(fx.ts(i), 100, 100.1, 99.9, 100, v) for i, v in enumerate(vols)))
+        self.assertEqual(f.med_volume(130, 20), 60_000)  # 0.6 x 100k day median, not the 10k lunch median
+        early = Features(tuple(Candle(fx.ts(i), 100, 100.1, 99.9, 100, 1000 + i) for i in range(30)))
+        self.assertEqual(early.med_volume(30, 20), median(1000 + i for i in range(10, 30)))
 
 
 class NoLookAheadAndDeterminism(unittest.TestCase):

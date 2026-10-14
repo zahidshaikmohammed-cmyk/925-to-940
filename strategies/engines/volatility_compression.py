@@ -21,6 +21,8 @@ Definitions (LONG; SHORT mirrored). e = t-1 is the expansion bar, t the confirma
   Expansion e: C_e >= hi + 0.10 W; TR_e >= 2.0 x mean TR(box); V_e >= 2.0 x median V(box);
   body ratio >= 0.55; CLV_e >= 0.3.
   Confirmation t: C_t > hi and L_t >= hi - 0.25 W.
+  No chase: TR_e <= 8 x mean box TR (a shock candle is news, not compression) and
+  (trigger - hi) <= 0.6 x (trigger - mid) (the risk must not be mostly the chase).
 Trade: stop-entry above max(H_e, H_t); stop = mid (back to the middle = failed expansion);
   target 2R.
 """
@@ -40,6 +42,8 @@ class VolatilityCompressionExpansionEngine(Engine):
     EARLIEST = time(10, 15)
     MIN_BARS = 61
     BOX, CR_MAX = 15, 0.60
+    MAX_RANGE_RATIO = 8.0        # a shock candle (news) is not a compression breakout
+    MAX_CHASE = 0.6              # entry may sit at most 60% of the risk beyond the box edge
     COOLDOWN_MINUTES = 30
 
     def __init__(self):
@@ -101,6 +105,8 @@ class VolatilityCompressionExpansionEngine(Engine):
             return no(f"expansion_volume_{vr:.2f}x")
         if body < 0.55 or clv < 0.3:
             return no("expansion_bar_not_decisive")
+        if trr > self.MAX_RANGE_RATIO:
+            return no(f"shock_candle_range_{trr:.1f}x")
         if sv.c[t] <= hi or sv.l[t] < hi - 0.25 * w:
             return no("expansion_not_confirmed")
         atr, vw = sv.atr[t], sv.vwap[t]
@@ -124,4 +130,7 @@ class VolatilityCompressionExpansionEngine(Engine):
             f"confirmed by the {sv.ts[t]:%H:%M} close {sv.real(sv.c[t]):.2f} holding outside",
         )
         trigger = max(sv.h[e], sv.h[t])
+        chase = (trigger - hi) / (trigger - mid) if trigger > mid else 1.0
+        if chase > self.MAX_CHASE:
+            return no(f"chasing_{chase:.0%}_of_risk_beyond_box")
         return Setup(trigger, mid, tuple(comps), f"box{sv.ts[b0]:%H%M}-{sv.ts[e]:%H%M}", conds)

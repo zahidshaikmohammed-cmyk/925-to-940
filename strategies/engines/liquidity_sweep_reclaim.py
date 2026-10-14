@@ -40,6 +40,7 @@ class LiquiditySweepReclaimEngine(Engine):
     PIVOT_K, PIVOT_MIN_AGE, MAX_SWEEP_AGE = 3, 10, 3
     P_MIN, P_MAX, VR_MIN = 0.05, 1.0, 1.5
     COOLDOWN_MINUTES = 15
+    STYLE = "fade"               # counter-trend by design: fade-specific safety gates
 
     def _pools(self, stock, sv, t: int, atr: float) -> list[tuple[Level, int]]:
         """(level, first sweep index allowed). Swing pivots are computed once on bars < t;

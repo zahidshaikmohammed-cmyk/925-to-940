@@ -10,8 +10,9 @@ This module only defines:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
+from statistics import median
 
 from edge.costs import CostModel
 
@@ -280,6 +281,33 @@ class Reject:
     reason: str
 
 
+@dataclass(frozen=True)
+class SafetyConfig:
+    """Loss-avoidance gates applied to every engine's setup (live review, 2026-10-14).
+
+    All thresholds are judgment calls, not fitted values; see docs/STRATEGY_ENGINES.md §6a.
+    ``s`` = +1 LONG / -1 SHORT; day = C/previous_close - 1; from_open = C/open_0915 - 1.
+    """
+    # trend-following ("trend") engines
+    max_against_day: float = 0.01        # reject s*day < -1% ...
+    reversal_from_open: float = 0.01     # ... unless s*from_open >= +1% (a real reversal)
+    max_market_against: float = 0.005    # reject s*market_change < -0.5%
+    max_breadth_against: float = 0.20    # reject s*(breadth - 0.5) < -0.20
+    max_day_move_trend: float = 0.08     # |day| >= 8%: news / circuit risk
+    # counter-trend ("fade") engines
+    max_day_move_fade: float = 0.04      # never fade a stock already +/-4% on the day
+    # reachability: |target - entry| <= k * ATR * sqrt(minutes from entry deadline to 15:15)
+    reach_k: float = 1.0
+    square_off: time = time(15, 15)
+    # liquidity-dependent slippage
+    thin_turnover: float = 1_000_000.0   # median rupees per minute below which ...
+    thin_slippage_bps: float = 5.0       # ... the ADVERSE slippage is assumed
+
+
+def _pct(x: float) -> str:
+    return f"{x * 100:+.2f}%"
+
+
 class Engine:
     """Base class: identity, trading window and the evaluation contract.
 
@@ -291,11 +319,13 @@ class Engine:
     NAME = "Engine"
     TITLE = ""
     EARLIEST = time(9, 30)       # first decision-candle START time the engine accepts
-    LATEST = time(14, 44)        # last decision-candle START time (entries close at 14:45)
+    LATEST = time(14, 15)        # last decision-candle START time: a 2R target needs time before 15:15
+    STYLE = "trend"              # "trend" (with the day/market) or "fade" (counter-trend by design)
     MIN_BARS = 20
     NEEDS_MARKET = False         # requires a valid cross-sectional market context
     ENTRY_VALID_MINUTES = 3
     risk = RiskConfig()
+    safety = SafetyConfig()
 
     def evaluate(self, stock, features, ctx) -> Evaluation:
         bars = stock.bars
@@ -318,9 +348,70 @@ class Engine:
     def side(self, stock, sv, ctx):  # pragma: no cover - abstract
         raise NotImplementedError
 
+    def context_gate(self, stock, features, ctx, s: int) -> tuple[str | None, str]:
+        """(reject reason or None, context line). Day, market and news-move gates."""
+        cfg = self.safety
+        c = features.c[-1]
+        pc = stock.previous_close
+        op = stock.today_open or features.o[0]
+        day = c / pc - 1.0 if pc else None
+        from_open = c / op - 1.0
+        mkt = None
+        if ctx is not None and ctx.valid:
+            mkt = ctx.ret_prev if ctx.ret_prev is not None else ctx.ret_open
+        line = (f"context: day {_pct(day) if day is not None else 'n/a'} vs prev close, "
+                f"{_pct(from_open)} vs open, market {_pct(mkt) if mkt is not None else 'n/a'}"
+                + (f", breadth {ctx.breadth_above_vwap:.0%}" if mkt is not None else ""))
+        if self.STYLE == "fade":
+            if day is not None and abs(day) >= cfg.max_day_move_fade:
+                return f"fade_blocked_day_move_{_pct(day)}", line
+            if mkt is not None and s * mkt < -cfg.max_market_against:
+                return f"fade_against_market_{_pct(mkt)}", line
+            return None, line + " (counter-trend setup by design)"
+        if day is not None and abs(day) >= cfg.max_day_move_trend:
+            return f"news_or_circuit_risk_day_move_{_pct(day)}", line
+        if day is not None and s * day < -cfg.max_against_day and s * from_open < cfg.reversal_from_open:
+            return f"against_the_day_{_pct(day)}", line
+        if day is None and s * from_open < -cfg.max_against_day:
+            return f"against_the_day_from_open_{_pct(from_open)}", line
+        if mkt is not None:
+            if s * mkt < -cfg.max_market_against:
+                return f"against_the_market_{_pct(mkt)}", line
+            if s * (ctx.breadth_above_vwap - 0.5) < -cfg.max_breadth_against:
+                return f"against_market_breadth_{ctx.breadth_above_vwap:.0%}", line
+        return None, line
+
+    def risk_for(self, features) -> RiskConfig:
+        """Thinly traded stocks get the ADVERSE slippage assumption in the cost gate."""
+        recent = range(max(0, features.n - 30), features.n)
+        turnover = median(features.c[i] * features.v[i] for i in recent)
+        if turnover < self.safety.thin_turnover:
+            return replace(self.risk, cost_slippage_bps=max(self.risk.cost_slippage_bps,
+                                                            self.safety.thin_slippage_bps))
+        return self.risk
+
+    def reachable(self, trade: Trade, features, bar_time: datetime) -> str | None:
+        """Reject a target the stock cannot plausibly reach before the square-off: a random
+        walk with 1-minute scale ATR moves about ATR*sqrt(M) in M minutes."""
+        atr = features.atr[-1]
+        if not atr:
+            return None
+        deadline = bar_time + timedelta(minutes=1 + self.ENTRY_VALID_MINUTES)
+        square = datetime.combine(deadline.date(), self.safety.square_off, deadline.tzinfo)
+        minutes = (square - deadline).total_seconds() / 60.0
+        if minutes <= 0:
+            return "no_time_left_before_square_off"
+        reach = self.safety.reach_k * atr * math.sqrt(minutes)
+        need = abs(trade.target - trade.entry)
+        if need > reach:
+            return f"target_unreachable_{need / atr:.1f}ATR_in_{minutes:.0f}min"
+        return None
+
     def _evaluate(self, stock, features, ctx) -> Evaluation:
         results: list[Evaluation] = []
         rejects: list[Reject] = []
+        risk = self.risk_for(features)
+        bar_time = stock.bars[-1].ts
         for direction in self.DIRECTIONS:
             s = 1 if direction == LONG else -1
             sv = features.side(s)
@@ -328,13 +419,21 @@ class Engine:
             if isinstance(found, Reject):
                 rejects.append(found)
                 continue
+            why_ctx, ctx_line = self.context_gate(stock, features, ctx, s)
+            if why_ctx:
+                rejects.append(Reject(NO_SETUP, f"{direction.lower()}_safety:{why_ctx}"))
+                continue
             target = None if found.target is None else sv.real(found.target)
-            trade, why = build_trade(direction, sv.real(found.trigger), sv.real(found.stop), self.risk, target)
+            trade, why = build_trade(direction, sv.real(found.trigger), sv.real(found.stop), risk, target)
             if trade is None:
                 rejects.append(Reject(NO_SETUP, f"{direction.lower()}_risk_gate:{why}"))
                 continue
+            why_reach = self.reachable(trade, features, bar_time)
+            if why_reach:
+                rejects.append(Reject(NO_SETUP, f"{direction.lower()}_safety:{why_reach}"))
+                continue
             results.append(finish(self, stock.symbol, direction, trade, list(found.components),
-                                  stock.bars[-1].ts, found.anchor, list(found.conditions)))
+                                  bar_time, found.anchor, list(found.conditions) + [ctx_line]))
         if results:
             # best score wins; LONG before SHORT on an exact tie (deterministic)
             return max(results, key=lambda e: (e.score, e.direction == LONG))

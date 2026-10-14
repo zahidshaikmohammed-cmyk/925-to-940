@@ -131,6 +131,6 @@ def format_daily_summary(day: str, summary: dict, scans: int, feed_failures: int
     for eng, s in sorted(summary.items()):
         states = ", ".join(f"{k} {v}" for k, v in sorted(s["states"].items()))
         r = s["r"]
-        rtxt = f" | closed {len(r)}, sum {sum(r):+.2f}R (gross, at modelled prices)" if r else ""
+        rtxt = f" | closed {len(r)}, sum {sum(r):+.2f}R (net of modelled costs)" if r else ""
         lines.append(f"• {html.escape(eng)}: {s['signals']} signal(s): {html.escape(states)}{rtxt}")
     return "\n".join(lines)

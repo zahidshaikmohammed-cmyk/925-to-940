@@ -37,6 +37,7 @@ class FailedBreakoutBreakdownEngine(Engine):
     MIN_BARS = 19
     MAX_AGE, ACCEPT_ATR, FAIL_ATR, MAX_EXT_ATR = 12, 0.05, 0.10, 1.5
     COOLDOWN_MINUTES = 30
+    STYLE = "fade"               # counter-trend by design: fade-specific safety gates
 
     def side(self, stock, sv, ctx):
         t = sv.t
@@ -48,7 +49,8 @@ class FailedBreakoutBreakdownEngine(Engine):
         for b in range(max(t - self.MAX_AGE, 1), t - 1):
             levels = list(sup)
             if b >= 30:
-                levels.append(Level("DL" if sv.s == 1 else "DH", min(sv.l[:b]), b, 0.8))
+                # known from bars 0..b-1, so usable at b (since=0; the old since=b made it dead code)
+                levels.append(Level("DL" if sv.s == 1 else "DH", min(sv.l[:b]), 0, 0.8))
             for lv in levels:
                 if b <= lv.since or sv.c[b - 1] < lv.price:
                     continue

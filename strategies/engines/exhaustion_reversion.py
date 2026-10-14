@@ -36,6 +36,7 @@ class ExhaustionMeanReversionEngine(Engine):
     MIN_BARS = 37
     Z_MIN, RUN_MIN, CV_MIN, WICK_MIN, RSI_MAX = 2.5, 3.0, 3.0, 0.35, 20.0
     COOLDOWN_MINUTES = 30
+    STYLE = "fade"               # counter-trend by design: fade-specific safety gates
 
     def side(self, stock, sv, ctx):
         t = sv.t

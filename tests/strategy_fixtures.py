@@ -135,12 +135,17 @@ def sc_relative_strength():
 
 
 def sc_compression():
+    """A slow 15-bar coil (small candles drifting across a 0.8-rupee box), then a decisive
+    break that is NOT chased: the entry stays within 60% of the risk from the box edge."""
+    import math
     t = Tape(100.0)
     t.flat(15, 100.0, amp=0.3, v=40_000, wick=0.2)
-    t.flat(55, 100.0, amp=0.2, v=20_000, wick=0.15)
-    t.flat(15, 100.0, amp=0.03, v=12_000, wick=0.03)
-    t.bar(100.45, v=80_000, o=100.0, h=100.48, l=99.98)  # expansion
-    t.bar(100.55, v=40_000, up=0.03, dn=0.03)             # confirmation
+    t.flat(55, 100.0, amp=0.35, v=20_000, wick=0.25)
+    for k in range(15):
+        t.bar(round(100.0 + 0.4 * math.sin(2 * math.pi * (k + 1) / 15), 2), v=12_000, up=0.02, dn=0.02)
+    hi = max(b.high for b in t.bars[-15:])
+    t.bar(hi + 0.30, v=80_000, up=0.02, dn=0.02)          # expansion
+    t.bar(hi + 0.32, v=40_000, up=0.02, dn=0.03)          # confirmation
     return t.done(), 100.0, None
 
 
@@ -167,7 +172,7 @@ def sc_vwap_reclaim():
     vw = Features(t.done()).vwap[-1]
     t.bar(vw + 0.20, v=10_000, up=0.06, l=vw - 0.05)     # retest touch
     t.bar(t.last + 0.22, v=30_000, up=0.02, dn=0.05)     # trigger
-    return t.done(), 103.0, None
+    return t.done(), 101.0, None                         # gapped up to 103, now +0.5% on the day
 
 
 def sc_exhaustion():

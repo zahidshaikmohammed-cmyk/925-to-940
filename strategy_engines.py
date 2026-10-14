@@ -61,6 +61,7 @@ class DayState:
     last_feed_alert: datetime | None = None
     last_archive: datetime | None = None
     summary_sent: bool = False
+    halted: str | None = None
     verbose: bool = True
 
     @property
@@ -125,16 +126,54 @@ def series_inputs(raw_session, scan_time: datetime) -> dict[str, StockInput]:
 
 # --------------------------------------------------------------------------- cycle
 
+@dataclass(frozen=True)
+class Governor:
+    """Daily risk limits across all engines (judgment values, see docs §7)."""
+    max_new_per_scan: int = 2          # highest scores first
+    max_open_same_direction: int = 3   # PENDING + TRIGGERED in one direction
+    daily_stop_r: float = -3.0         # realised net R at which alerts stop for the day
+    max_losing_streak: int = 3         # consecutive losing trades at which alerts stop
+
+
+GOVERNOR = Governor()
+
+
+def governor_block(st: DayState, direction: str, accepted_now: int) -> str | None:
+    g = GOVERNOR
+    if st.ledger.realised_r() <= g.daily_stop_r:
+        return f"daily_loss_limit_{st.ledger.realised_r():+.2f}R"
+    if st.ledger.losing_streak() >= g.max_losing_streak:
+        return f"losing_streak_{st.ledger.losing_streak()}"
+    if accepted_now >= g.max_new_per_scan:
+        return "max_new_alerts_this_minute"
+    if st.ledger.open_count(direction) >= g.max_open_same_direction:
+        return f"max_open_{direction.lower()}_trades"
+    return None
+
+
 def handle_report(st: DayState, report: ScanReport, now: datetime, send: bool = True) -> list[dict]:
-    """Dedup, record and alert the report's signals; advance lifecycles. Returns new records."""
+    """Advance lifecycles, then dedup, apply the governor, record and alert. Returns new records."""
+    bars = {s: v.bars for s, v in report.views.items()}
+    changed = st.ledger.update(bars)
     new = []
-    for sig in report.signals:
+    halted_before = st.halted
+    for sig in sorted(report.signals, key=lambda x: (-x.score, x.engine, x.symbol)):
         ok, why = st.ledger.decide(sig)
         if not ok:
             continue
+        block = governor_block(st, sig.direction, len(new))
+        if block:
+            st.journal("GOVERNOR_SKIP", key=sig.key, score=sig.score, reason=block)
+            if block.startswith(("daily_loss", "losing_streak")):
+                st.halted = block
+            continue
         new.append(st.ledger.record(sig))
-    bars = {s: v.bars for s, v in report.views.items()}
-    changed = st.ledger.update(bars)
+    if st.halted and not halted_before:
+        msg = f"RISK LIMIT: {st.halted} -- no more alerts today"
+        print(f"{now:%H:%M:%S} {msg}", flush=True)
+        st.journal("GOVERNOR_HALT", reason=st.halted)
+        if send and st.notifier.enabled:
+            st.notifier.send(f"⛔ <b>{msg}</b>")
     if send:
         retry_unsent(st, now)
     for rec in new:
@@ -142,7 +181,8 @@ def handle_report(st: DayState, report: ScanReport, now: datetime, send: bool = 
     for rec in changed:
         if st.verbose:
             print(f"{now:%H:%M:%S} [{rec['engine']}] {rec['symbol']} {rec['direction']} -> {rec['state']}"
-                  + (f" ({rec['r_multiple']:+.2f}R)" if rec.get("r_multiple") is not None else ""))
+                  + (f" ({rec['r_multiple']:+.2f}R gross, {rec['r_net']:+.2f}R net)"
+                     if rec.get("r_net") is not None else ""))
     st.ledger.save()
     return new
 
@@ -370,7 +410,7 @@ def replay(paths: list[str], engines_names: list[str] | None, data_dir: Path, ve
             t["signals"] += s["signals"]
             t["states"].update(s["states"])
             t["r"] += s["r"]
-    print("\nREPLAY TOTALS (gross R at modelled prices; stop assumed first on two-sided bars; no costs deducted)")
+    print("\nREPLAY TOTALS (net R after modelled costs; stop assumed first on two-sided bars)")
     for name in ENGINE_NAMES:
         t = total.get(name)
         if not t:

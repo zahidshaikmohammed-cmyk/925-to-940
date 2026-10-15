@@ -65,10 +65,13 @@ class SignalLedger:
         for r in same:
             if sig.signal_time - datetime.fromisoformat(r["signal_time"]) < cd:
                 return False, "within_cooldown"
-        # across engines: one alert per stock per SYMBOL_GAP, never a flip inside it
+        # across engines: never against an open trade, one alert per stock per SYMBOL_GAP,
+        # never a flip inside it
         for r in self.records.values():
             if r["symbol"] != sig.symbol:
                 continue
+            if r["state"] in ACTIVE and r["direction"] != sig.direction:
+                return False, "opposite_direction_trade_open"
             if sig.signal_time - datetime.fromisoformat(r["signal_time"]) < SYMBOL_GAP:
                 if r["direction"] != sig.direction:
                     return False, "opposite_direction_alerted_recently"
@@ -159,7 +162,10 @@ class SignalLedger:
                 fill = max(entry, b.open) if long else min(entry, b.open)
                 rec["fill"] = fill
                 if hit_stop:
-                    close("STOPPED", stop)
+                    close("STOPPED", stop)          # both touched in one bar: stop assumed first
+                elif hit_target:
+                    # the bar traded through entry and target without touching the stop
+                    close("TARGET", max(target, b.open) if long else min(target, b.open))
                 return
             if hit_stop:
                 close("INVALIDATED", None)
@@ -170,7 +176,7 @@ class SignalLedger:
         elif hit_stop:
             close("STOPPED", min(stop, b.open) if long else max(stop, b.open))
         elif hit_target:
-            close("TARGET", target)
+            close("TARGET", max(target, b.open) if long else min(target, b.open))   # gap fills at the open
 
     # ---------------------------------------------------------------- storage
     def save(self) -> None:

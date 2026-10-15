@@ -76,6 +76,10 @@ class RegimeFilteredORBEngine(Engine):
             if rvol < self.RVOL_MIN:
                 return no(f"not_in_play_rvol_{rvol:.2f}")
             in_play = ramp(rvol, 1.5, 3.0)
+            if p.or_source != "psygrid":
+                # Yahoo 5-minute volume is not on the live PSYGRID scale (unverified ratio): treat
+                # it like the turnover proxy -- at most half credit, so it cannot carry a 90+
+                in_play *= 0.5
             in_play_note = f"RVOL {rvol:.2f}x the {p.or_days}-session opening-volume median ({p.or_source or 'history'})"
             raw = rvol
         else:

@@ -78,7 +78,7 @@ class TrendPullbackContinuationEngine(Engine):
             return no(f"pullback_depth_{depth:.2f}")
         if sv.vwap[pl_i] is None or pl < sv.vwap[pl_i] - 0.25 * atr:
             return no("pullback_lost_vwap")
-        if pl_i < t - 6:
+        if pl_i < t - 5:                     # pullback low among the last 6 bars (t-5..t)
             return no("pullback_low_too_old")
         imp_vol = sum(sv.v[a:p + 1]) / (p + 1 - a)
         pb_bars = sv.v[p + 1:t]

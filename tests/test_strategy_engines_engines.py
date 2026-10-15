@@ -304,6 +304,13 @@ class ORB(unittest.TestCase):
         self.assertEqual(sig.stop, round_to_tick(min(b.low for b in bars[:15]), 0.01, False))
         self.assertEqual(sig.anchor, "ORB20261013")
 
+    def test_yahoo_volume_baseline_cannot_carry_90(self):
+        from strategies.features import PriorLevels
+        bars, pc, _ = fx.sc_orb()
+        ev = single(self.N, bars, pc, PriorLevels("2026-10-12", None, None, None, 300_000.0, 14, "yahoo"))
+        self.assertNotEqual(ev.status, SIGNAL)
+        self.assertLessEqual(ev.score or 0, 87.5)
+
     def test_proxy_without_history_cannot_reach_90(self):
         bars, pc, _ = fx.sc_orb()
         big = tuple(replace(b, volume=b.volume * 50) for b in bars)  # top opening turnover

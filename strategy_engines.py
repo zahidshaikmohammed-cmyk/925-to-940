@@ -40,7 +40,8 @@ from strategies.telegram import TelegramNotifier, format_daily_summary, format_f
 from strategy_930 import Candle
 
 FIRST_SCAN = time(9, 16)          # the 09:15 candle is complete at 09:16:00
-LAST_SCAN = time(15, 16)          # lifecycle tracking runs to the 15:15 square-off candle
+LAST_SCAN = time(15, 16)          # last scan minute: at 15:16:xx the 15:15 square-off candle is complete
+END_OF_DAY = time(15, 17)         # stop once the 15:16 scan has run (it books the 15:15 time exits)
 FINAL_ARCHIVE = time(15, 31)      # the 15:29 candle is complete at 15:30: save the FULL session then
 FINAL_ARCHIVE_UNTIL = time(16, 0) # give up on the final save after this
 FEED_ALERT_EVERY = timedelta(minutes=15)
@@ -154,13 +155,24 @@ def governor_block(st: DayState, direction: str, accepted_now: int) -> str | Non
     return None
 
 
-def handle_report(st: DayState, report: ScanReport, now: datetime, send: bool = True) -> list[dict]:
-    """Advance lifecycles, then dedup, apply the governor, record and alert. Returns new records."""
-    bars = {s: v.bars for s, v in report.views.items()}
+def handle_report(st: DayState, report: ScanReport, now: datetime, send: bool = True,
+                  bars: dict | None = None) -> list[dict]:
+    """Advance lifecycles, then dedup, apply the governor, record and alert. Returns new records.
+
+    ``bars``: every stock's parsed bars (not only the currently valid ones), so an open trade
+    keeps being tracked when its stock turns stale or illiquid."""
+    if bars is None:
+        bars = {s: v.bars for s, v in report.views.items()}
     changed = st.ledger.update(bars)
     new = []
     halted_before = st.halted
+    scan_minute = now.replace(second=0, microsecond=0)
     for sig in sorted(report.signals, key=lambda x: (-x.score, x.engine, x.symbol)):
+        if sig.signal_time < scan_minute:
+            # decided on a bar older than the minute just completed: its entry window is mostly
+            # gone and price may already be through the entry or stop -- never alert it
+            st.journal("STALE_SIGNAL_SKIPPED", key=sig.key, signal_time=sig.signal_time.isoformat())
+            continue
         ok, why = st.ledger.decide(sig)
         if not ok:
             continue
@@ -323,7 +335,7 @@ def live_cycle(st: DayState, client: PsygridClient, send: bool = True, clock=now
     if not report.context.valid and scan_time.time() >= PARTIAL_FEED_CHECK_FROM:
         # before 09:21 every stock has < 5 completed bars by construction: not a feed fault
         feed_problem(st, now, f"partial feed: {report.valid} valid of {report.received} ({report.context.reason})", send)
-    new = handle_report(st, report, scan_time, send)
+    new = handle_report(st, report, scan_time, send, bars={s: si.bars for s, si in inputs.items() if si.bars})
     journal_report(st, report, new)
     print(scan_line(report), flush=True)
     if st.last_archive is None or scan_time - st.last_archive >= ARCHIVE_EVERY or scan_time.time() >= time(15, 14):
@@ -396,7 +408,7 @@ def run_day(st: DayState, client: PsygridClient, offset: int, send: bool = True,
                          "You will get a message for every 90+ signal, any data-feed problem, and a summary at the close.")
     while True:
         now = clock()
-        if now.time() > LAST_SCAN:
+        if now.time() >= END_OF_DAY:
             daily_summary(st, send)
             if st.final_archived or now.time() >= FINAL_ARCHIVE_UNTIL:
                 return 0
@@ -450,7 +462,8 @@ def replay(paths: list[str], engines_names: list[str] | None, data_dir: Path, ve
             inputs = series_inputs(raw, scan_time)
             st.universe |= set(inputs)
             report = run_scan(inputs, scan_time, engines, st.priors, st.universe)
-            handle_report(st, report, scan_time, send=False)
+            handle_report(st, report, scan_time, send=False,
+                          bars={s: si.bars for s, si in inputs.items() if si.bars})
             if verbose:
                 print(scan_line(report))
             minute += timedelta(minutes=1)
@@ -529,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     if not is_trading_day(today.date()):
         print(f"NOT AN NSE TRADING DAY: {today.date()} (holiday calendar: run_engine.NSE_HOLIDAYS_2026)")
         return 20
-    if today.time() > LAST_SCAN:
+    if today.time() >= END_OF_DAY:
         print("Session over for today.")
         return 23
     client = PsygridClient(args.base_url, timeout=args.timeout, expected_universe=args.expected_universe)

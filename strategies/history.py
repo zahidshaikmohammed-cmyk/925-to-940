@@ -18,7 +18,7 @@ Rules (no look-ahead, no silent repair):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from statistics import median
 
@@ -54,8 +54,9 @@ def _stats_from_rows(rows, minutes_per_bar: int) -> DayStats | None:
     or_rows = [r for r in rows if r[0].time() < OR_END]
     need = 15 // minutes_per_bar
     or_vol = sum(r[5] for r in or_rows) if len(or_rows) == need else None
-    last_bar_end = (rows[-1][0] + timedelta(minutes=minutes_per_bar)).time()
-    complete = last_bar_end >= time(15, 25) and rows[0][0].time() == time(9, 15)
+    # complete = the session's final bar is present (15:29 for 1-minute, 15:25 for 5-minute bars)
+    last_start = (datetime.combine(rows[-1][0].date(), time(15, 30)) - timedelta(minutes=minutes_per_bar)).time()
+    complete = rows[-1][0].time() >= last_start and rows[0][0].time() == time(9, 15)
     return DayStats(max(r[2] for r in rows), min(r[3] for r in rows), rows[-1][4], or_vol, complete)
 
 
@@ -109,13 +110,17 @@ def build_priors(today: date, is_trading_day, psygrid: dict, yahoo: dict,
               "pdc_mismatch": 0, "no_previous_session": 0}
     for sym in sorted(set(psygrid) | set(yahoo) | set(feed_prev_close)):
         ps, yh = psygrid.get(sym, {}), yahoo.get(sym, {})
-        day = ps.get(prev) or yh.get(prev)
+        # the first COMPLETE source for the previous day (an incomplete PSYGRID save must not
+        # hide a complete Yahoo day)
+        day = next((d for d in (ps.get(prev), yh.get(prev)) if d is not None and d.complete), None)
+        mismatch = False
         pdh = pdl = pdc = None
-        if day is not None and day.complete:
+        if day is not None:
             pdh, pdl, pdc = day.high, day.low, day.close
             fpc = feed_prev_close.get(sym)
             if fpc and abs(pdc / fpc - 1.0) > 0.005:
                 pdh = pdl = pdc = None
+                mismatch = True          # split/bonus/bad data: history is on another price/volume scale
                 report["pdc_mismatch"] += 1
         else:
             report["no_previous_session"] += 1
@@ -125,6 +130,8 @@ def build_priors(today: date, is_trading_day, psygrid: dict, yahoo: dict,
             if len(vols) >= min_or_days:
                 base, ndays, source = median(vols), len(vols), name
                 break
+        if mismatch:
+            base, ndays, source = None, 0, ""
         if pdh is None and base is None:
             continue
         priors[sym] = PriorLevels(prev.isoformat(), pdh, pdl, pdc, base, ndays, source)

@@ -216,6 +216,62 @@ class Ledger(unittest.TestCase):
             self.assertIn("LEDGER-WARN", out.getvalue())
 
 
+class AuditRegressions(unittest.TestCase):
+    """Bugs found by the 2026-10-15 independent math/logic audit."""
+
+    def setUp(self):
+        self.rep, self.u, self.at = sweep_report()
+        self.sig = [s for s in self.rep.signals if s.engine == SWEEP][0]
+
+    def bars(self, *ohlc, start=None):
+        start = start or self.sig.signal_time
+        return [Candle(start + timedelta(minutes=i), *x, 1000) for i, x in enumerate(ohlc)]
+
+    def test_trigger_bar_that_reaches_target_is_a_win(self):
+        e, s, t = self.sig.entry, self.sig.stop, self.sig.target
+        led = SignalLedger(None)
+        rec = led.record(self.sig)
+        led.update({SYM: self.bars((e - 0.01, t + 0.05, e - 0.02, t))})     # entry -> target, stop untouched
+        self.assertEqual(rec["state"], "TARGET")
+        self.assertGreater(rec["r_multiple"], 1.9)
+
+    def test_target_gap_fills_at_the_open(self):
+        e, s, t = self.sig.entry, self.sig.stop, self.sig.target
+        led = SignalLedger(None)
+        rec = led.record(self.sig)
+        led.update({SYM: self.bars((e, e + 0.01, e, e), (t + 1.0, t + 1.1, t + 0.9, t + 1.0))})
+        self.assertEqual((rec["state"], rec["exit_price"]), ("TARGET", t + 1.0))
+
+    def test_no_trade_against_an_open_trade_on_the_same_stock(self):
+        led = SignalLedger(None)
+        led.record(self.sig)                                                 # LONG, still PENDING
+        far = replace(self.sig, engine="Other", anchor="z", direction="SHORT",
+                      signal_time=self.sig.signal_time + timedelta(minutes=45))
+        self.assertEqual(led.decide(far)[1], "opposite_direction_trade_open")
+
+    def test_stale_signal_is_never_alerted(self):
+        st = se.new_day_state(fx.DAY.date(), Path(tempfile.mkdtemp()), [], TelegramNotifier("", ""), persist=False)
+        late = self.sig.signal_time + timedelta(minutes=2, seconds=8)        # bar is 2 minutes old
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(se.handle_report(st, self.rep, late, send=False), [])
+            fresh = se.handle_report(st, self.rep, self.sig.signal_time + timedelta(seconds=8), send=False)
+        self.assertTrue(fresh)
+
+    def test_open_trade_tracked_when_stock_leaves_valid_views(self):
+        st = se.new_day_state(fx.DAY.date(), Path(tempfile.mkdtemp()), [], TelegramNotifier("", ""), persist=False)
+        rec = st.ledger.record(self.sig)
+        e, s = self.sig.entry, self.sig.stop
+        bars = {SYM: self.bars((e, e + 0.01, e, e), (e, e, s - 0.05, s))}
+        empty = replace(self.rep, views={}, signals=[]) if hasattr(self.rep, "__dataclass_fields__") else self.rep
+        with contextlib.redirect_stdout(io.StringIO()):
+            se.handle_report(st, empty, self.sig.signal_time + timedelta(minutes=2, seconds=8), send=False, bars=bars)
+        self.assertEqual(rec["state"], "STOPPED")
+
+    def test_day_ends_after_the_1516_scan_so_1515_time_exits_are_booked(self):
+        self.assertEqual(se.END_OF_DAY, time(15, 17))
+        self.assertLess(datetime.combine(fx.DAY.date(), time(15, 16, 8)).time(), se.END_OF_DAY)
+
+
 class GovernorRules(unittest.TestCase):
     def state(self):
         rep, _, _ = sweep_report()
@@ -374,6 +430,29 @@ class History(unittest.TestCase):
         self.assertNotIn("B", pri)                                            # no levels from a partial day
         self.assertNotIn("C", pri)                                            # 10% close mismatch: dropped
         self.assertEqual(rep["pdc_mismatch"], 1)
+
+    def test_incomplete_psygrid_day_does_not_hide_complete_yahoo_day(self):
+        td = lambda d: d.weekday() < 5
+        prev = date(2026, 10, 12)
+        pri, _ = build_priors(date(2026, 10, 13), td, {"A": {prev: DayStats(105, 95, 101, None, False)}},
+                              {"A": {prev: DayStats(106, 94, 100, None, True)}}, {"A": 100.0})
+        self.assertEqual((pri["A"].pdh, pri["A"].pdl), (106, 94))
+
+    def test_corporate_action_drops_volume_baseline_too(self):
+        td = lambda d: d.weekday() < 5
+        prev = date(2026, 10, 12)
+        days = {prev - timedelta(days=k): DayStats(105, 95, 105, 50_000, True) for k in range(0, 10)}
+        pri, rep = build_priors(date(2026, 10, 13), td, {"A": days}, {}, {"A": 21.0})   # 1:5 split
+        self.assertNotIn("A", pri)
+        self.assertEqual(rep["pdc_mismatch"], 1)
+
+    def test_day_complete_needs_the_final_bar(self):
+        from strategies.history import _stats_from_rows
+        mk = lambda last: [(datetime.combine(fx.DAY.date(), time(9, 15), IST), 1, 1, 1, 1, 1),
+                           (datetime.combine(fx.DAY.date(), last, IST), 1, 1, 1, 1, 1)]
+        self.assertFalse(_stats_from_rows(mk(time(15, 24)), 1).complete)
+        self.assertTrue(_stats_from_rows(mk(time(15, 29)), 1).complete)
+        self.assertTrue(_stats_from_rows(mk(time(15, 25)), 5).complete)
 
     def test_archive_round_trip_feeds_tomorrows_levels(self):
         bars, pc, _ = fx.sc_structural()

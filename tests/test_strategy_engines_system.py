@@ -555,6 +555,23 @@ class DailyRunner(unittest.TestCase):
         code, sent, out, journal, archived, ledger, st = self.run_day(start=time(9, 17, 8), scans=2)
         self.assertNotIn("partial feed", out)
 
+    def test_slow_download_reported_as_such_not_as_partial_feed(self):
+        u, priors, _ = fx.scenario_universe(SWEEP, SYM)
+        raw = {s: payload(si.bars, si.previous_close) for s, si in u.items()}
+        t0 = datetime.combine(fx.DAY.date(), time(10, 1, 8), IST)
+        ticks = iter([t0, t0 + timedelta(seconds=170), t0 + timedelta(seconds=171)])
+        clock = lambda: next(ticks, t0 + timedelta(seconds=172))
+        with tempfile.TemporaryDirectory() as d:
+            notifier = FakeNotifier()
+            st = se.new_day_state(fx.DAY.date(), Path(d), build_engines([SWEEP]), notifier)
+            st.priors = priors
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rep = se.live_cycle(st, FakeClient(raw), True, clock)
+        self.assertIsNone(rep)
+        self.assertIn("arrived", out.getvalue())
+        self.assertNotIn("partial feed", out.getvalue())
+        self.assertEqual(st.scans, 0)
+
     def test_waits_for_first_completed_candle(self):
         code, sent, out, journal, archived, ledger, st = self.run_day(start=time(9, 10), scans=1)
         self.assertIn("waiting for the first completed candle", out)

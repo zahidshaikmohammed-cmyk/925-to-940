@@ -48,6 +48,7 @@ FEED_ALERT_EVERY = timedelta(minutes=15)
 ARCHIVE_EVERY = timedelta(minutes=15)
 MAX_TELEGRAM_ATTEMPTS = 5
 PARTIAL_FEED_CHECK_FROM = time(9, 21)
+MAX_FETCH_SECONDS = 45            # fetch + parse slower than this leaves only stale candles
 
 
 @dataclass
@@ -321,8 +322,7 @@ def live_cycle(st: DayState, client: PsygridClient, send: bool = True, clock=now
     if not live:
         feed_problem(st, now, f"feed not live: {why}", send)
         return None
-    scan_time = clock()
-    inputs = live_inputs(client, raw, scan_time)
+    inputs = live_inputs(client, raw, clock())
     newest = newest_bar_date(inputs)
     if newest != st.day:
         feed_problem(st, now, f"feed carries {newest} candles, not today's ({st.day})", send)
@@ -330,11 +330,21 @@ def live_cycle(st: DayState, client: PsygridClient, send: bool = True, clock=now
     st.universe |= set(inputs)
     st.save_universe()
     ensure_priors(st, inputs)
+    scan_time = clock()
+    lag = (scan_time - now).total_seconds()
+    if lag > MAX_FETCH_SECONDS:
+        # the download (or start-up work) took so long that every candle is now too old to trade:
+        # say so plainly instead of reporting it as a "partial feed"
+        feed_problem(st, now, f"data arrived {lag:.0f}s late (slow internet/PC or slow feed); "
+                              "this minute skipped to avoid stale signals", send)
+        return None
     report = run_scan(inputs, scan_time, st.engines, st.priors, st.universe)
     st.scans += 1
     if not report.context.valid and scan_time.time() >= PARTIAL_FEED_CHECK_FROM:
         # before 09:21 every stock has < 5 completed bars by construction: not a feed fault
-        feed_problem(st, now, f"partial feed: {report.valid} valid of {report.received} ({report.context.reason})", send)
+        why = ", ".join(f"{k}={v}" for k, v in report.quality_reasons.most_common(3))
+        feed_problem(st, now, f"partial feed: {report.valid} valid of {report.received} "
+                              f"({report.context.reason}; main reasons: {why})", send)
     new = handle_report(st, report, scan_time, send, bars={s: si.bars for s, si in inputs.items() if si.bars})
     journal_report(st, report, new)
     print(scan_line(report), flush=True)

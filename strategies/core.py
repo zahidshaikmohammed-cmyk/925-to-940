@@ -296,7 +296,11 @@ class SafetyConfig:
     max_day_move_trend: float = 0.08     # |day| >= 8%: news / circuit risk
     # counter-trend ("fade") engines
     max_day_move_fade: float = 0.04      # never fade a stock already +/-4% on the day
-    # reachability: |target - entry| <= k * ATR * sqrt(minutes from entry deadline to 15:15)
+    # holding horizon: a triggered trade is closed at the open of the first bar >= 30 minutes
+    # after the trigger (or at 15:15, whichever is first) -- in and out within 30 minutes
+    max_hold_minutes: int = 30
+    # reachability: |target - entry| <= k * ATR * sqrt(M), M = min(max hold, minutes from the
+    # entry deadline to 15:15)
     reach_k: float = 1.0
     square_off: time = time(15, 15)
     # liquidity-dependent slippage
@@ -391,14 +395,15 @@ class Engine:
         return self.risk
 
     def reachable(self, trade: Trade, features, bar_time: datetime) -> str | None:
-        """Reject a target the stock cannot plausibly reach before the square-off: a random
-        walk with 1-minute scale ATR moves about ATR*sqrt(M) in M minutes."""
+        """Reject a target the stock cannot plausibly reach within the holding horizon (30
+        minutes, or less if 15:15 comes first): a random walk with 1-minute scale ATR moves
+        about ATR*sqrt(M) in M minutes."""
         atr = features.atr[-1]
         if not atr:
             return None
         deadline = bar_time + timedelta(minutes=1 + self.ENTRY_VALID_MINUTES)
         square = datetime.combine(deadline.date(), self.safety.square_off, deadline.tzinfo)
-        minutes = (square - deadline).total_seconds() / 60.0
+        minutes = min(float(self.safety.max_hold_minutes), (square - deadline).total_seconds() / 60.0)
         if minutes <= 0:
             return "no_time_left_before_square_off"
         reach = self.safety.reach_k * atr * math.sqrt(minutes)

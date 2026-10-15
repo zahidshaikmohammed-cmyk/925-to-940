@@ -11,7 +11,7 @@ from statistics import median
 
 from strategies import indicators as ind
 from strategies.core import (BELOW_THRESHOLD, INSUFFICIENT_DATA, LONG, NO_SETUP, OUTSIDE_WINDOW, SHORT,
-                             SIGNAL, RiskConfig, round_to_tick, safe_tick)
+                             SIGNAL, RiskConfig, SafetyConfig, round_to_tick, safe_tick)
 from strategies.engines import ENGINE_CLASSES, ENGINE_NAMES, build_engines
 from strategies.features import Features
 from strategies.scanner import StockInput, run_scan
@@ -21,8 +21,17 @@ from tests import strategy_fixtures as fx
 SYM = "TEST"
 
 
-def scan(universe, priors, at, names=None):
-    return run_scan(universe, at, build_engines(names), priors)
+# The synthetic textbook scenarios are smooth, low-ATR price paths whose 2R targets are 6-10
+# ATR away -- unreachable inside the live 30-minute hold. The engine-logic tests below therefore
+# run with a whole-session horizon; the 30-minute horizon itself is tested in SafetyGates.
+LOGIC_SAFETY = replace(SafetyConfig(), max_hold_minutes=24 * 60)
+
+
+def scan(universe, priors, at, names=None, safety=LOGIC_SAFETY):
+    engines = build_engines(names)
+    for e in engines:
+        e.safety = safety
+    return run_scan(universe, at, engines, priors)
 
 
 @functools.lru_cache(maxsize=None)
@@ -437,9 +446,26 @@ class SafetyGates(unittest.TestCase):
         f = Features(bars)
         self.assertAlmostEqual(f.atr[-1], 0.1)
         trade = lambda move: Trade(LONG, 100.0, 100.0 - move / 2, 100.0 + move, move / 2, 0.5, 2.0, 0.2)
-        # deadline 14:14 -> 61 minutes to 15:15 -> reach = 0.1 * sqrt(61) = 0.78
+        # 30-minute hold -> reach = 0.1 * sqrt(30) = 0.548
+        self.assertIsNone(eng.reachable(trade(0.54), f, bars[-1].ts))
+        self.assertEqual(eng.reachable(trade(0.56), f, bars[-1].ts), "target_unreachable_5.6ATR_in_30min")
+        # whole-session horizon: deadline 14:14 -> 61 minutes to 15:15 -> reach = 0.1 * sqrt(61) = 0.78
+        eng.safety = LOGIC_SAFETY
         self.assertIsNone(eng.reachable(trade(0.7), f, bars[-1].ts))
         self.assertIn("target_unreachable", eng.reachable(trade(1.0), f, bars[-1].ts))
+        # near the close 15:15 binds before the 30 minutes: last bar 14:50 -> deadline 14:54 -> 21 min
+        late = tuple(Candle(fx.ts(i), 100, 100.05, 99.95, 100, 1000) for i in range(336))
+        eng.safety = SafetyConfig()
+        self.assertEqual(eng.reachable(trade(0.5), Features(late), late[-1].ts), "target_unreachable_5.0ATR_in_21min")
+
+    def test_textbook_targets_too_far_for_a_30_minute_hold_are_rejected(self):
+        for n in ("Trend_Pullback_Continuation_Engine", "Volatility_Compression_Expansion_Engine",
+                  "Regime_Filtered_ORB_Engine"):
+            u, priors, at = fx.scenario_universe(n, SYM)
+            ev = ev_of(scan(u, priors, at, [n], safety=SafetyConfig()), n)
+            self.assertEqual(ev.status, NO_SETUP)
+            self.assertIn("target_unreachable", ev.reason)
+            self.assertIn("in_30min", ev.reason)
 
     def test_no_new_entries_after_1415_and_orb_window(self):
         for c in ENGINE_CLASSES:

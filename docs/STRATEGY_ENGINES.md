@@ -151,7 +151,7 @@ fitting them to the same days you then evaluate would be curve fitting.
     The slippage is an assumption, because there are no quotes.
   - In effect the stop must be at least about 0.49% away.
   - An explicit target must still pay at least 1.5R.
-- **Time stop.** 15:15. No new signal starts after the 14:15 decision bar.
+- **Time stop.** 30 minutes after the trigger: a trade that has hit neither stop nor target is closed at the open of the first bar starting 30 minutes after the trigger bar (or at 15:15 if that comes first). No new signal starts after the 14:15 decision bar.
 
 ## 6a. Loss-avoidance safety gates (added after the first live session)
 
@@ -170,7 +170,7 @@ change vs previous close.
 | With the market | reject `s·market < −0.5%` or `s·(breadth − 0.5) < −0.20` | trend engines |
 | News / circuit | reject `|day| ≥ 8%` | trend engines |
 | Fade limits | reject `|day| ≥ 4%` or `s·market < −0.5%` | fade engines (sweep, failed breakout, exhaustion) |
-| Reachable target | reject if `|target − entry| > ATR·sqrt(M)`, where M is the minutes from the entry deadline to 15:15 | all |
+| Reachable target | reject if `|target − entry| > ATR·sqrt(M)`, where M = min(30, minutes from the entry deadline to 15:15) — the target must be reachable inside the 30-minute hold | all |
 | Last entry | no decision bar after 14:15 (ORB: 09:59, when its earliness score stops allowing 90+) | all |
 | Thin stocks | 5 bps slippage below ₹10 lakh per minute median turnover | all |
 | Lunch volume | every "× normal volume" baseline is at least 0.6 × the median volume since 09:30 | all |
@@ -407,7 +407,7 @@ which requires a flat day relative to the previous close.
 - `ret_open ≥ 0` and breadth ≥ 0.5.
 - Decision bars run 09:30–09:59.
 
-**Stop:** ORL, the literature's opposite-side stop. **Target:** 2R. **Time exit:** 15:15.
+**Stop:** ORL, the literature's opposite-side stop. **Target:** 2R. **Time exit:** 30 minutes after entry (the literature holds to the close; this is a deliberate departure for the system-wide 30-minute horizon).
 
 **Volume scale:** RVOL from Yahoo history may differ in scale from PSYGRID volume. The source is
 named in the alert.
@@ -660,7 +660,7 @@ is moved aside, with a warning.
 | `PENDING` | `EXPIRED` | 3 minutes pass without a trigger. |
 | `TRIGGERED` | `STOPPED` | The stop trades. |
 | `TRIGGERED` | `TARGET` | The target trades. |
-| `TRIGGERED` | `TIME_EXIT` | The 15:15 bar is reached. |
+| `TRIGGERED` | `TIME_EXIT` | The first bar starting ≥ 30 min after the trigger bar, or the 15:15 bar, is reached; filled at its open. |
 
 If one bar touches both the stop and the target, the stop is assumed.
 

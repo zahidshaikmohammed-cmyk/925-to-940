@@ -22,7 +22,8 @@ Definitions (LONG; SHORT mirrored):
   Regime: market return since open >= 0 and breadth above VWAP >= 0.50 (LONG).
   Window: decision bars 09:30-09:59.
 Trade: stop-entry above H_t; stop = ORL (the literature's opposite-side stop); target 2R;
-  time exit 15:15 (Zarattini et al. hold to the close).
+  time exit 30 minutes after entry (system-wide horizon; Zarattini et al. hold to the close,
+  so this is a deliberate departure from the literature).
 """
 from __future__ import annotations
 
@@ -117,6 +118,6 @@ class RegimeFilteredORBEngine(Engine):
             f"{max(sv.real(orl), sv.real(orh)):.2f}; first close beyond it at {sv.ts[t]:%H:%M}",
             f"stock in play: {in_play_note}",
             f"opening drive agrees; market since open {ctx.ret_open:+.2%}, breadth above VWAP {ctx.breadth_above_vwap:.0%}",
-            "time exit 15:15 if neither stop nor target",
+            "time exit 30 min after entry if neither stop nor target",
         )
         return Setup(sv.h[t], orl, tuple(comps), f"ORB{sv.ts[t]:%Y%m%d}", conds)

@@ -132,6 +132,8 @@ def format_signal(rec: dict) -> str:
         f"<b>Entry:</b> {'buy' if long else 'sell'}-stop {'above' if long else 'below'} {_p(rec['entry'])}"
         f" (cancel if not triggered by {vu:%H:%M} IST)",
         f"<b>Stop-loss:</b> {_p(rec['stop'])} | <b>Target:</b> {_p(rec['target'])} ({rec['reward_r']:.1f}R)",
+        f"<b>Max hold:</b> {rec.get('max_hold_minutes', 30)} min after entry — if neither stop nor"
+        f" target is hit by then, exit at market (and in any case by 15:15)",
         f"<b>Risk:</b> {rec['risk_pct']:.2f}% of entry | costs ≈ {rec['cost_r']:.2f}R",
         f"<b>Signal time:</b> {st:%Y-%m-%d %H:%M} IST (decision candle {bt:%H:%M})",
         "<b>Why:</b>",

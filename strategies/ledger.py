@@ -16,7 +16,8 @@ LONG shown, SHORT mirrored; where one bar touches both levels the stop is assume
   PENDING  -> TRIGGERED when High >= entry          (same bar Low <= stop -> STOPPED)
   PENDING  -> INVALIDATED when Low <= stop first    (the setup broke before entry)
   PENDING  -> EXPIRED when the bar starts at/after valid_until without a trigger
-  TRIGGERED-> STOPPED (Low <= stop) | TARGET (High >= target) | TIME_EXIT (bar >= 15:15)
+  TRIGGERED-> STOPPED (Low <= stop) | TARGET (High >= target) | TIME_EXIT (at the open of the first
+           bar starting >= trigger + max_hold_minutes (30), or >= 15:15, whichever is first)
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from .core import LONG, Signal
 ACTIVE = ("PENDING", "TRIGGERED")
 SYMBOL_GAP = timedelta(minutes=30)
 SQUARE_OFF = time(15, 15)
+MAX_HOLD_MINUTES = 30
 
 
 def _iso(x: datetime) -> str:
@@ -105,6 +107,7 @@ class SignalLedger:
             "bar_time": _iso(sig.bar_time), "signal_time": _iso(sig.signal_time),
             "valid_until": _iso(sig.valid_until), "anchor": sig.anchor, "conditions": list(sig.conditions),
             "components": [asdict(c) for c in sig.components],
+            "max_hold_minutes": MAX_HOLD_MINUTES, "triggered_at": None,
             "state": "PENDING", "state_time": None, "exit_price": None, "r_multiple": None, "r_net": None,
             "last_bar": None, "telegram": {"sent": False, "attempts": 0, "error": None, "message_id": None},
         }
@@ -158,6 +161,7 @@ class SignalLedger:
                 return
             if hit_entry:
                 rec["state"], rec["state_time"] = "TRIGGERED", _iso(b.ts)
+                rec["triggered_at"] = _iso(b.ts)
                 # a gap through the entry fills at the open, not at the trigger
                 fill = max(entry, b.open) if long else min(entry, b.open)
                 rec["fill"] = fill
@@ -171,7 +175,9 @@ class SignalLedger:
                 close("INVALIDATED", None)
             return
         # TRIGGERED
-        if b.ts.astimezone(IST).time() >= SQUARE_OFF:
+        hold = timedelta(minutes=rec.get("max_hold_minutes", MAX_HOLD_MINUTES))
+        trig = datetime.fromisoformat(rec.get("triggered_at") or rec["state_time"])
+        if b.ts.astimezone(IST).time() >= SQUARE_OFF or b.ts >= trig + hold:
             close("TIME_EXIT", b.open)
         elif hit_stop:
             close("STOPPED", min(stop, b.open) if long else max(stop, b.open))

@@ -200,6 +200,20 @@ class Ledger(unittest.TestCase):
         led.update({SYM: bars})
         self.assertEqual((rec["state"], rec["exit_price"]), ("TIME_EXIT", e + 0.1))
 
+    def test_time_exit_30_minutes_after_trigger(self):
+        led = SignalLedger(None)
+        rec = led.record(self.sig)
+        e, s = self.sig.entry, self.sig.stop
+        flat = (e, e + 0.01, (e + s) / 2 + 0.01, e)       # never reaches stop or target
+        bars = self._bars((e - 0.01, e + 0.01, e - 0.01, e), *[flat] * 29, (e + 0.05,) * 4, flat)
+        led.update({SYM: bars[:30]})                       # bars 1..29 minutes after the trigger
+        self.assertEqual(rec["state"], "TRIGGERED")
+        self.assertEqual(rec["triggered_at"], bars[0].ts.astimezone(IST).isoformat())
+        led.update({SYM: bars})
+        self.assertEqual((rec["state"], rec["exit_price"]), ("TIME_EXIT", e + 0.05))
+        self.assertEqual(datetime.fromisoformat(rec["state_time"]), bars[0].ts + timedelta(minutes=30))
+        self.assertAlmostEqual(rec["r_multiple"], round(0.05 / (e - s), 3))
+
     def test_persistence_and_corrupt_file(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "ledger.json"
@@ -378,7 +392,8 @@ class Telegram(unittest.TestCase):
         text = format_signal(rec)
         for needle in (SYM, "LONG", SWEEP, "Liquidity Sweep + Reclaim", f"{sig.score:.1f}",
                        f"₹{sig.entry:,.2f}", f"₹{sig.stop:,.2f}", f"₹{sig.target:,.2f}",
-                       sig.signal_time.strftime("%Y-%m-%d %H:%M"), "a &lt;b&gt; &amp; c", "not a probability"):
+                       sig.signal_time.strftime("%Y-%m-%d %H:%M"), "a &lt;b&gt; &amp; c", "not a probability",
+                       "Max hold:</b> 30 min after entry"):
             self.assertIn(needle, text)
         self.assertIn("Silence does NOT mean no opportunity", format_feed_problem(sig.signal_time, "x"))
 

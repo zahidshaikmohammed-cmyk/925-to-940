@@ -428,6 +428,7 @@ class DailyRunner(unittest.TestCase):
             nxt = times[-1].replace(second=0) + timedelta(minutes=1, seconds=8)
             times.append(nxt)
         times.append(datetime.combine(fx.DAY.date(), time(15, 17), IST))
+        times.append(datetime.combine(fx.DAY.date(), time(15, 31, 8), IST))      # final complete save
         state = {"i": 0}
         clock = lambda: times[min(state["i"], len(times) - 1)]
 
@@ -456,6 +457,7 @@ class DailyRunner(unittest.TestCase):
         rec = list(ledger["signals"].values())[0]
         self.assertTrue(rec["telegram"]["sent"])
         self.assertEqual(st.scans, 5)
+        self.assertTrue(st.final_archived)                                 # 15:31 complete-session save ran
 
     def test_feed_down_is_reported_not_silent(self):
         code, sent, out, journal, archived, ledger, st = self.run_day(mode="down")
@@ -489,14 +491,15 @@ class PriorsAtFirstScan(unittest.TestCase):
             full.append(Candle(full[-1].ts + timedelta(minutes=1), 100.0, 100.1, 99.9, 100.0, 20_000))
         yraw = {SYM: payload(shift(full), 99.0)}
         raw = {s: payload(si.bars, 100.0 if s == SYM else si.previous_close) for s, si in u.items()}
-        times = [datetime.combine(fx.DAY.date(), time(10, 1, 8), IST), datetime.combine(fx.DAY.date(), time(15, 17), IST)]
+        times = [datetime.combine(fx.DAY.date(), time(10, 1, 8), IST), datetime.combine(fx.DAY.date(), time(15, 17), IST),
+                 datetime.combine(fx.DAY.date(), time(15, 31, 8), IST)]
         state = {"i": 0}
         with tempfile.TemporaryDirectory() as d:
             se.archive_session(Path(d), yday, yraw, {"status": "OK"})
             st = se.new_day_state(fx.DAY.date(), Path(d), build_engines([SWEEP]), FakeNotifier())
             self.assertIsNone(st.priors)
             with contextlib.redirect_stdout(io.StringIO()):
-                se.run_day(st, FakeClient(raw), 8, True, lambda: times[min(state["i"], 1)],
+                se.run_day(st, FakeClient(raw), 8, True, lambda: times[min(state["i"], 2)],
                            lambda _: state.__setitem__("i", state["i"] + 1))
         p = st.priors[SYM]
         self.assertEqual(p.day, yday.isoformat())

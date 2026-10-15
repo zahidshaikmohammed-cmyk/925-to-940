@@ -41,6 +41,8 @@ from strategy_930 import Candle
 
 FIRST_SCAN = time(9, 16)          # the 09:15 candle is complete at 09:16:00
 LAST_SCAN = time(15, 16)          # lifecycle tracking runs to the 15:15 square-off candle
+FINAL_ARCHIVE = time(15, 31)      # the 15:29 candle is complete at 15:30: save the FULL session then
+FINAL_ARCHIVE_UNTIL = time(16, 0) # give up on the final save after this
 FEED_ALERT_EVERY = timedelta(minutes=15)
 ARCHIVE_EVERY = timedelta(minutes=15)
 MAX_TELEGRAM_ATTEMPTS = 5
@@ -61,6 +63,7 @@ class DayState:
     last_feed_alert: datetime | None = None
     last_archive: datetime | None = None
     summary_sent: bool = False
+    final_archived: bool = False
     halted: str | None = None
     verbose: bool = True
 
@@ -332,6 +335,24 @@ def live_cycle(st: DayState, client: PsygridClient, send: bool = True, clock=now
     return report
 
 
+def final_archive(st: DayState, client: PsygridClient, clock=now_ist) -> None:
+    """Save today's COMPLETE session (through the 15:29 candle) so tomorrow has PDH/PDL/PDC.
+    The in-session saves stop at 15:14, which the history loader rightly treats as incomplete."""
+    st.final_archived = True
+    try:
+        raw = client.market()
+        inputs = live_inputs(client, raw, clock())
+        if newest_bar_date(inputs) != st.day:
+            print("[ARCHIVE] final save skipped: feed no longer carries today's candles", flush=True)
+            return
+        path = archive_session(st.root, st.day, raw, client.last_market_meta)
+        print(f"[ARCHIVE] complete session saved for tomorrow's levels: {path}", flush=True)
+        st.journal("FINAL_ARCHIVE", path=str(path))
+    except Exception as exc:
+        print(f"[ARCHIVE-WARN] final save failed: {exc}", flush=True)
+        st.journal("FINAL_ARCHIVE_FAILED", error=str(exc))
+
+
 def seconds_to_next_scan(now: datetime, offset: int) -> float:
     target = now.replace(second=0, microsecond=0) + timedelta(minutes=1, seconds=offset)
     return max(1.0, (target - now).total_seconds())
@@ -377,6 +398,15 @@ def run_day(st: DayState, client: PsygridClient, offset: int, send: bool = True,
         now = clock()
         if now.time() > LAST_SCAN:
             daily_summary(st, send)
+            if st.final_archived or now.time() >= FINAL_ARCHIVE_UNTIL:
+                return 0
+            if now.time() < FINAL_ARCHIVE:
+                wait = (datetime.combine(now.date(), FINAL_ARCHIVE, IST) - now).total_seconds() + offset
+                print(f"{now:%H:%M:%S} waiting until {FINAL_ARCHIVE:%H:%M} to save the complete session "
+                      "(tomorrow's previous-day levels)", flush=True)
+                sleep(max(1.0, wait))
+                continue
+            final_archive(st, client, clock)
             return 0
         if now.time() < FIRST_SCAN:
             wait = (datetime.combine(now.date(), FIRST_SCAN, IST) - now).total_seconds() + offset

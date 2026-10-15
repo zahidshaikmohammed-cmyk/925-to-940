@@ -446,25 +446,26 @@ def run_day(st: DayState, client: PsygridClient, offset: int, send: bool = True,
 
 # --------------------------------------------------------------------------- replay
 
-def replay(paths: list[str], engines_names: list[str] | None, data_dir: Path, verbose: bool) -> int:
+REPLAY_FIELDS = ("day", "engine", "symbol", "direction", "score", "signal_time", "entry", "stop", "target",
+                 "risk_pct", "cost_r", "state", "state_time", "fill", "exit_price", "r_multiple", "r_net")
+
+
+def replay_day(path: str, engines_names: list[str] | None, data_dir: str, verbose: bool) -> dict:
+    """Replay one saved session minute by minute (a separate process per day)."""
+    import contextlib
+    import io
     from intelligence.selector_data import load_session_file
-    files: list[Path] = []
-    for item in paths:
-        p = Path(item)
-        files += sorted(p.glob("*.json*")) if p.is_dir() else ([p] if p.is_file() else [])
-    if not files:
-        print("No session files found.")
-        return 2
-    total = {}
-    for f in files:
-        raw = load_session_file(f)
+    started = systime.perf_counter()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        raw = load_session_file(Path(path))
         day = raw.session_date
         engines = build_engines(engines_names)
-        st = new_day_state(day, data_dir, engines, TelegramNotifier("", ""), persist=False)
+        st = new_day_state(day, Path(data_dir), engines, TelegramNotifier("", ""), persist=False)
         st.verbose = verbose
         prev_close = {s: ser.previous_close for s, ser in raw.stocks.items()}
-        st.priors, prep = load_priors(day, data_dir, is_trading_day, prev_close)
-        print(f"\nREPLAY {day} ({f.name}) | priors: {prep}")
+        st.priors, prep = load_priors(day, Path(data_dir), is_trading_day, prev_close)
+        print(f"\nREPLAY {day} ({Path(path).name}) | priors: {prep}")
         minute = datetime.combine(day, FIRST_SCAN, IST)
         end = datetime.combine(day, LAST_SCAN, IST)
         while minute <= end:
@@ -477,21 +478,77 @@ def replay(paths: list[str], engines_names: list[str] | None, data_dir: Path, ve
             if verbose:
                 print(scan_line(report))
             minute += timedelta(minutes=1)
-        summ = st.ledger.summary()
-        for eng, s in summ.items():
-            t = total.setdefault(eng, {"signals": 0, "states": Counter(), "r": []})
-            t["signals"] += s["signals"]
-            t["states"].update(s["states"])
-            t["r"] += s["r"]
+    trades = [{"day": day.isoformat(), **{k: r.get(k) for k in REPLAY_FIELDS if k != "day"}}
+              for r in st.ledger.records.values()]
+    return {"day": day.isoformat(), "summary": st.ledger.summary(), "trades": trades,
+            "log": buf.getvalue(), "seconds": systime.perf_counter() - started}
+
+
+def replay(paths: list[str], engines_names: list[str] | None, data_dir: Path, verbose: bool,
+           workers: int = 0) -> int:
+    import csv
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    files: list[Path] = []
+    for item in paths:
+        p = Path(item)
+        files += sorted(p.glob("*.json*")) if p.is_dir() else ([p] if p.is_file() else [])
+    if not files:
+        print("No session files found.")
+        return 2
+    workers = workers or max(1, min(len(files), (os.cpu_count() or 2) - 1))
+    print(f"Replaying {len(files)} session(s) on {workers} process(es). One day takes roughly 10-30 minutes "
+          f"per process; progress is printed as each day finishes. Ctrl+C prints the totals so far.",
+          flush=True)
+    total: dict = {}
+    trades: list[dict] = []
+    done = 0
+    t0 = systime.perf_counter()
+    pool = ProcessPoolExecutor(max_workers=workers)
+    try:
+        futs = {pool.submit(replay_day, str(f), engines_names, str(data_dir), verbose): f for f in files}
+        for fut in as_completed(futs):
+            done += 1
+            try:
+                res = fut.result()
+            except Exception as exc:
+                print(f"[REPLAY-ERROR] {futs[fut].name}: {type(exc).__name__}: {exc}", flush=True)
+                continue
+            print(res["log"], end="")
+            print(f"[{done}/{len(files)}] {res['day']} done in {res['seconds'] / 60:.1f} min, "
+                  f"{len(res['trades'])} signal(s); elapsed {(systime.perf_counter() - t0) / 60:.1f} min", flush=True)
+            trades += res["trades"]
+            for eng, s in res["summary"].items():
+                t = total.setdefault(eng, {"signals": 0, "states": Counter(), "r": []})
+                t["signals"] += s["signals"]
+                t["states"].update(s["states"])
+                t["r"] += s["r"]
+    except KeyboardInterrupt:
+        print(f"\nInterrupted after {done} of {len(files)} day(s); totals below cover those days only.")
+        pool.shutdown(wait=False, cancel_futures=True)
+    else:
+        pool.shutdown()
+    out = data_dir / "engines" / "replay_trades.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=REPLAY_FIELDS)
+        w.writeheader()
+        w.writerows(sorted(trades, key=lambda r: (r["day"], r["signal_time"] or "", r["symbol"])))
     print("\nREPLAY TOTALS (net R after modelled costs; stop assumed first on two-sided bars)")
+    all_r: list[float] = []
     for name in ENGINE_NAMES:
         t = total.get(name)
         if not t:
             print(f"  {name:<42} 0 signals")
             continue
         r = t["r"]
+        all_r += r
+        wins = sum(1 for x in r if x > 0)
         print(f"  {name:<42} {t['signals']:>3} signals | {dict(t['states'])} | closed {len(r)} "
-              f"| mean {sum(r) / len(r) if r else 0:+.2f}R")
+              f"| wins {wins} | mean {sum(r) / len(r) if r else 0:+.2f}R | total {sum(r):+.1f}R")
+    if all_r:
+        print(f"  {'ALL ENGINES':<42} closed {len(all_r)} | wins {sum(1 for x in all_r if x > 0)} "
+              f"| mean {sum(all_r) / len(all_r):+.2f}R | total {sum(all_r):+.1f}R")
+    print(f"Every trade: {out}")
     print("Judge an engine only on a large out-of-sample count (50+ closed trades), never on one day.")
     return 0
 
@@ -512,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--once", action="store_true", help="one scan now, then exit")
     ap.add_argument("--replay", nargs="+", metavar="PATH", help="replay saved session file(s)/folder(s)")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--workers", type=int, default=0, help="replay: parallel processes (default: CPU count - 1)")
     ap.add_argument("--engines", default="", help="comma-separated engine names (default: all ten)")
     ap.add_argument("--no-telegram", action="store_true")
     ap.add_argument("--telegram-test", action="store_true")
@@ -538,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--scan-offset must be 0-59")
     data_dir = Path(args.data_dir)
     if args.replay:
-        return replay(args.replay, names, data_dir, args.verbose)
+        return replay(args.replay, names, data_dir, args.verbose, args.workers)
     notifier = TelegramNotifier()
     if args.telegram_test:
         if not notifier.enabled:

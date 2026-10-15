@@ -624,8 +624,11 @@ class Replay(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             se.archive_session(Path(d), fx.DAY.date(), raw, {"status": "OK"})
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                code = se.replay([str(Path(d) / "sessions")], [SWEEP], Path(d), False)
+                code = se.replay([str(Path(d) / "sessions")], [SWEEP], Path(d), False, workers=1)
+            rows = (Path(d) / "engines" / "replay_trades.csv").read_text(encoding="utf-8").splitlines()
         self.assertEqual(code, 0)
+        self.assertEqual(rows[0].split(",")[:3], ["day", "engine", "symbol"])
+        self.assertTrue(any(SWEEP in r and SYM in r for r in rows[1:]))
         text = out.getvalue()
         self.assertIn("REPLAY 2026-10-13", text)
         line = [x for x in text.splitlines() if x.strip().startswith(SWEEP)][0]

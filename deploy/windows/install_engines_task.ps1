@@ -7,7 +7,8 @@
 #   - saves your Telegram token and chat id to telegram.env in this folder (git-ignored),
 #   - registers the task "PSYGRID-Engines": Mon-Fri 09:05, runs whether or not you are logged
 #     in, wakes the PC from sleep, retries 3 times if it fails, never runs twice at once,
-#   - allows wake timers on mains power so the PC can wake itself at 09:05.
+#   - retries every 10 min until 15:05 and at logon, so a missed 09:05 start is caught up,
+#   - allows wake timers (mains and battery) so the PC can wake itself at 09:05.
 # Each morning the task pulls the latest code, runs the engines (they keep the PC awake until
 # 15:16), and logs to data\engines\logs\. Telegram tells you it started; holidays exit at once.
 # The PC must be switched ON or ASLEEP and plugged in. A shut-down PC cannot start itself.
@@ -58,18 +59,26 @@ $wrapper = Join-Path $repo "deploy\windows\run_engines.ps1"
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrapper`" -Python `"$python`"" `
     -WorkingDirectory $repo
+# Weekdays 09:05, then RETRY every 10 minutes until 15:05. While the engines run, the retries are
+# ignored (MultipleInstances IgnoreNew); if 09:05 was missed (PC asleep and not woken, crash,
+# reboot), the next retry starts the day -- the engines resume their ledger, so nothing is re-sent.
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 9:05am
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At 9:05am -RepetitionInterval (New-TimeSpan -Minutes 10) `
+                       -RepetitionDuration (New-TimeSpan -Hours 6)).Repetition
+# also start when you log on to Windows (a weekday morning after the PC was off)
+$logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 8) `
             -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
 # S4U = run whether the user is logged on or not, without storing a password.
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
-Register-ScheduledTask -TaskName "PSYGRID-Engines" -Action $action -Trigger $trigger -Settings $settings `
+Register-ScheduledTask -TaskName "PSYGRID-Engines" -Action $action -Trigger @($trigger, $logon) -Settings $settings `
     -Principal $principal -Description "PSYGRID ten strategy engines: weekday minute scans, Telegram 90+ alerts" `
     -Force | Out-Null
 
 # --- let the PC wake itself (mains power) for the 09:05 start
 powercfg /SETACVALUEINDEX SCHEME_CURRENT SUB_SLEEP RTCWAKE 1 | Out-Null
+powercfg /SETDCVALUEINDEX SCHEME_CURRENT SUB_SLEEP RTCWAKE 1 | Out-Null   # on battery too
 powercfg /SETACTIVE SCHEME_CURRENT | Out-Null
 
 Get-ScheduledTask -TaskName "PSYGRID-Engines" | Select-Object TaskName, State

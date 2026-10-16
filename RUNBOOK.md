@@ -273,3 +273,35 @@ ever duplicated or changed.
   tune them on the first sessions; use `--research` after 60+ sessions.
 * Sector features exist only for symbols in `sector_map.json` (pluggable via
   `--sector-map`); coverage is printed with every decision, unclassified stocks stay null.
+
+
+## sr.py -- index option alerts (Windows PowerShell)
+
+Signals only; nothing is sent to a broker. Lot sizes are never guessed: pass the ones you verified on
+the NSE / BSE contract specifications (used only when the feed itself carries no `lot_size`).
+
+```powershell
+cd C:\Users\<you>\OneDrive\Desktop\925-to-940-LATEST
+git fetch origin
+git checkout origin/claude/affectionate-mayer-cei670 -- sr.py sr_eval.py tests/test_sr.py tests/test_sr_eval.py
+python sr.py --self-test
+python -m unittest discover -s tests -t .
+
+# before / after market: does the feed carry usable data? (HTTP OK is not enough)
+python sr.py --schema
+
+# trading day: start any time before 09:25; it waits, monitors to 15:30, records snapshots
+python sr.py --lot-size NIFTY=<n> --lot-size BANKNIFTY=<n> --lot-size SENSEX=<n> --record snaps
+
+# one fetch, every setup and the gate that decided it
+python sr.py --once --explain --lot-size NIFTY=<n>
+
+# after the session: replay a recorded day, then measure (use later days as out-of-sample)
+python sr.py --replay snaps\20261019 --lot-size NIFTY=<n>
+python sr_eval.py snaps --lot-size NIFTY=<n> --lot-size BANKNIFTY=<n> --lot-size SENSEX=<n> --split 2026-11-01 --json eval.json
+```
+
+Files: `sr_audit.jsonl` (every decision and reason), `sr_signals.jsonl` (alerts and exits),
+`sr_state.json` (restart recovery for today only; delete it to start the day clean), `snaps\YYYYMMDD\`
+(gzip snapshots, ~every 15 s). `DATA <INDEX>: BLOCKED -- ...` lines name the exact missing or stale
+field; `FEED FAILURE` means no usable HTTP response at all. Neither is "no setup".

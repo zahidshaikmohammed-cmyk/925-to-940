@@ -1,13 +1,15 @@
 # 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 
-> **S/R option signals (NIFTY / BANKNIFTY / SENSEX):** `python sr.py` polls
-> `http://140.245.228.101:10000/public/all.json` every 3 s, watches live price heading into each
-> support/resistance zone, and on a completed 1-minute candle signals BREAKOUT, REJECTION, RETEST or
-> TRAP trades. Each is confirmed with EMA9/20/50, 5m EMAs, VWAP, RSI, ADX, MACD and option-chain OI
-> flow (writing/unwinding at the level strike, ATM OI change, build-up). It picks the CE/PE by delta,
-> spread and depth, and gives index plus premium SL/T1/T2. Signals score 0-100 and fire at >= 65.
-> `--once --explain` shows why each setup passed or failed; `--schema` checks the feed's fields;
-> `--record DIR` / `--replay DIR` save a day and re-run it offline.
+> **S/R option signals (NIFTY / BANKNIFTY / SENSEX):** `python sr.py --lot-size NIFTY=<n> ...` polls
+> `http://140.245.228.101:10000/public/all.json` from 09:25 IST. It alerts (never orders) only when
+> every mandatory gate passes: valid, fresh data; a strict BULLISH/BEARISH regime (1m EMAs + 5m
+> context + swing structure + ADX, confirmed on two candles; SIDEWAYS/TRANSITION never trade); an
+> entry window (PRIME 09:30-10:45, GOOD -11:15, SELECTIVE 13:30-14:00, SECONDARY -14:30); a
+> trend-aligned PULLBACK / BREAKOUT / REJECTION / RETEST / TRAP; a structural stop; room after costs;
+> and a liquid contract with real greeks and depth. Hard exit 15:00. Every decision goes to
+> `sr_audit.jsonl`; `sr_state.json` survives restarts. `--schema` prints a per-index data-health
+> verdict; `--record snaps` + `python sr_eval.py snaps --split DATE` measure precision, recall and
+> net expectancy on recorded sessions. See RUNBOOK.md (sr.py section).
 
 > **945 continuous scan:** `python 945.py` now rescans every stock once a minute from 09:30
 > and beeps only on a confirmed Tier 1 setup that still pays after costs. It tracks the

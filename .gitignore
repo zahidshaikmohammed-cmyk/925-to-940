@@ -9,3 +9,7 @@ index_state.json
 data/
 graded_signals.jsonl
 sr_signals.jsonl
+sr_audit.jsonl
+sr_state.json
+sr_state.json.tmp
+snaps/

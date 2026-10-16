@@ -1,5 +1,14 @@
 # 09:15–09:30 Opening-Impulse + Deep-Retracement Engine
 
+> **S/R option signals (NIFTY / BANKNIFTY / SENSEX):** `python sr.py` polls
+> `http://140.245.228.101:10000/public/all.json` every 3 s, watches live price heading into each
+> support/resistance zone, and on a completed 1-minute candle signals BREAKOUT, REJECTION, RETEST or
+> TRAP trades. Each is confirmed with EMA9/20/50, 5m EMAs, VWAP, RSI, ADX, MACD and option-chain OI
+> flow (writing/unwinding at the level strike, ATM OI change, build-up). It picks the CE/PE by delta,
+> spread and depth, and gives index plus premium SL/T1/T2. Signals score 0-100 and fire at >= 65.
+> `--once --explain` shows why each setup passed or failed; `--schema` checks the feed's fields;
+> `--record DIR` / `--replay DIR` save a day and re-run it offline.
+
 > **945 continuous scan:** `python 945.py` now rescans every stock once a minute from 09:30
 > and beeps only on a confirmed Tier 1 setup that still pays after costs. It tracks the
 > trade, keeps a journal in `data/scan/`, and can replay saved sessions with
